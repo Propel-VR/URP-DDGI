@@ -12,6 +12,7 @@ Many improvements were borrowed from [Timberdoodle's](https://github.com/Sunset-
 - Probe visibility generation
 - Probe radiance generation
 - Probe sampling
+- Probe repositioning
 - Cascaded probe system
 - Sparse probe system
   - Detaching physical probe location from location in memory
