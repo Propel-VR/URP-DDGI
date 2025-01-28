@@ -15,21 +15,14 @@ namespace DDGIURP
         Vector3 boxCenter;
         Vector3 boxSize;
         int probeCount;
-        NativeArray<float3> instanceData;
         MaterialPropertyBlock mpb;
 
         GraphicsBuffer instanceBuffer;
         GraphicsBuffer cmdBuffer;
         GraphicsBuffer.IndirectDrawIndexedArgs[] cmdData;
 
-        void OnDestroy ()
-        {
-            instanceBuffer?.Release();
-            cmdBuffer?.Release();
-            cmdBuffer = null;
-        }
-
-        public void UpdateLayout (int3 probeDimensions, float probeDensity, Vector3 boxCenter, Vector3 boxSize)
+        // TODO: Make all of these directly accessible
+        public void UpdateLayout (DDGIManager manager, int3 probeDimensions, float probeDensity, Vector3 boxCenter, Vector3 boxSize, int irrResPad, int irrRes)
         {
             this.boxCenter = boxCenter;
             this.boxSize = boxSize;
@@ -50,7 +43,7 @@ namespace DDGIURP
             cmdBuffer.SetData(cmdData);
             int i = 0;
 
-            instanceData = new NativeArray<float3>(probeCount, Allocator.Temp);
+            var instanceData = new NativeArray<ProbeData>(probeCount, Allocator.Temp);
             for (int x = 0; x < probeDimensions.x; x++)
             {
                 for (int y = 0; y < probeDimensions.y; y++)
@@ -62,42 +55,58 @@ namespace DDGIURP
                             Vector3.one * (probeDensity * 0.5f) +
                             transform.position;
 
-                        instanceData[i++] = (float3)center;
+                        instanceData[i++] = new ProbeData()
+                        {
+                            position = (float3)center,
+                            index = new int3(x, y, z),
+                        };
                     }
                 }
             }
 
             mpb.Clear();
-            instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, probeCount, sizeof(float) * 3 * 4);
+            instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, probeCount, ProbeData.SIZE);
             instanceBuffer.SetData(instanceData);
             instanceData.Dispose();
-            mpb.SetBuffer("_positionData", instanceBuffer);
+            mpb.SetBuffer(ShaderIds._probeData, instanceBuffer);
+            mpb.SetTexture(ShaderIds._Irradiance, manager.IrradianceTexture);
+            mpb.SetFloat(ShaderIds.irrResPad, irrResPad);
+            mpb.SetFloat(ShaderIds.irrRes, irrRes);
         }
 
-#if UNITY_EDITOR
         private void OnEnable()
         {
 
+#if UNITY_EDITOR
             SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
+#endif
         }
 
         private void OnDisable()
         {
 
+#if UNITY_EDITOR
             SceneView.duringSceneGui -= OnSceneGUI;
+#endif
+            instanceBuffer?.Release();
+            cmdBuffer?.Release();
+            cmdBuffer = null;
         }
 
+#if UNITY_EDITOR
         private void OnSceneGUI(SceneView sceneView)
         {
 
             Draw(sceneView.camera);
         }
+#endif
 
         private void Draw(Camera camera)
         {
             if (camera == null) return;
             if (debugMaterial == null) return;
+            if (cmdBuffer == null) return;
 
             var renderParams = new RenderParams(debugMaterial)
             {
@@ -114,6 +123,5 @@ namespace DDGIURP
                 cmdBuffer
             );
         }
-#endif
     }
 }

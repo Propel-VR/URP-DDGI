@@ -1,0 +1,43 @@
+#pragma kernel FillIrradianceWithDebugData
+#include "ProbeIncludes.hlsl"
+
+
+
+// ALL KERNEL
+uint irrRes;
+uint visRes;
+uint irrResPad;
+uint visResPad;
+uint3 probeDimensions;
+
+RWTexture2DArray<float3> _Irradiance;
+RWTexture2DArray<float2> _Visibility;
+
+
+
+// KERNEL FillIrradianceWithDebugData
+[numthreads(8,8,1)]
+void FillIrradianceWithDebugData(uint3 id : SV_DispatchThreadID)
+{
+    uint2 pixelId = id.xy;
+    uint layerId = id.z;
+    
+    uint irrWidth, irrHeight, irrLayers;
+    _Irradiance.GetDimensions(irrWidth, irrHeight, irrLayers);
+    
+    if (any(id >= uint3(irrWidth, irrHeight, irrLayers)))
+    {
+        return;
+    }
+    
+    uint3 probeId = uint3(pixelId / irrResPad, layerId);
+    uint2 pixelInProbeId = (id.xy - probeId.xy * irrResPad) - 1;
+    
+    // It's important to offset the pixels being unmapped by the octahedral
+    // encoding by 0.5f to fix a seam issue. Not sure how this will be relevent later.
+    int2 pixelWrapped = octahedral_texel_wrap(pixelInProbeId, irrRes);
+    float3 normal = unmap_octahedral((pixelWrapped + 0.5f) / (float) irrRes);
+    float3 debug = normal * 0.5f + 0.5f;
+    
+    _Irradiance[id] = debug;
+}

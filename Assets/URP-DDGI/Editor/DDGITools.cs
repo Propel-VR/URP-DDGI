@@ -27,11 +27,11 @@ namespace DDGIURP
                 {
                     tab1.Add(new UnityEngine.UIElements.Image() 
                     {
-                        image = _manager.RadianceTexture,
+                        image = _manager.IrradianceTexture,
                     });
                     tab2.Add(new UnityEngine.UIElements.Image()
                     {
-                        image = _manager.RadianceTexture,
+                        image = _manager.VisibilityTexture,
                     });
                 }
                 else
