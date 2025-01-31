@@ -1,0 +1,236 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#define LUT_DIMS 48
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+Texture2D<float4> Input;
+Texture3D<float4> LUT;
+RWTexture2D<float4> Result;
+SamplerState sampler_linear_clamp;
+
+int ToneMapSelection;
+
+int width;
+
+
+float3 tonemap22(float3 sRGB)
+{
+    // sRGB = pow(sRGB, 2.2f);
+    // NOTE: Tune these params based on your use case.
+    // Desmos graph: https://www.desmos.com/calculator/cvt2brlyl3
+    const float EXPOSUREX = 4.0;
+    const float CONTRAST = 1.9;
+    const float RANGE = 1.5;
+    
+    const float3x3 sRGB_to_LMS = transpose(float3x3(
+        0.31399022, 0.63951294, 0.04649755,
+        0.15537241, 0.75789446, 0.08670142,
+        0.01775239, 0.10944209, 0.87256922));
+
+    const float3x3 LMS_to_sRGB = transpose(float3x3(
+        5.47221206, -4.6419601 ,  0.16963708,
+       -1.1252419 ,  2.29317094, -0.1678952 ,
+        0.02980165, -0.19318073,  1.16364789));
+        
+    const float3 sRGB_to_Y = float3(0.2126729, 0.7151522, 0.0721750);
+    
+    // Apply tonescale in LMS
+    
+    float3 LMS = mul(sRGB, sRGB_to_LMS);
+    
+    LMS = pow(EXPOSUREX * LMS, CONTRAST / RANGE);
+    LMS = LMS / (LMS + 1.0);
+    LMS = pow(LMS, RANGE);
+    
+    sRGB = mul(LMS, LMS_to_sRGB);
+    
+    // Apply gamut mapping in sRGB
+    
+    float Y = dot(sRGB_to_Y, sRGB);
+    if (Y > 1.0)
+        return 1.0;
+        
+    float minimum = min(sRGB.r, min(sRGB.g, sRGB.b));
+    if (minimum < 0.0)
+        sRGB = lerp(sRGB, Y, -minimum / (Y - minimum));
+    
+    float maximum = max(sRGB.r, max(sRGB.g, sRGB.b));
+    if (maximum > 1.0)
+        sRGB = lerp(sRGB, Y, (1.0 - maximum) / (Y - maximum));
+    
+    return sRGB;
+}
+
+
+inline float3 tony_mc_mapface(float3 stimulus) {
+    // Apply a non-linear transform that the LUT is encoded with.
+    const float3 encoded = stimulus / (stimulus + 1.0);
+
+    // Align the encoded range to texel centers.
+    const float3 uv = encoded * ((LUT_DIMS - 1.0) / LUT_DIMS) + 0.5 / LUT_DIMS;
+
+    // Note: for OpenGL, do `uv.y = 1.0 - uv.y`
+
+    return LUT.SampleLevel(sampler_linear_clamp, uv, 0).xyz;
+}
+
+static float gamma = 2.2;
+float3 lumaBasedReinhardToneMapping(float3 color)
+{
+    color = pow(abs(color), 2.2f);
+    float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    float toneMappedLuma = luma / (1. + luma);
+    color *= toneMappedLuma / luma;
+    color = pow(color, 1. / gamma);
+    return color;
+}
+float3 RomBinDaHouseToneMapping(float3 color)
+{
+    //color = pow(color, gamma);
+    color = exp( -1.0 / ( 2.72*color + 0.15 ) );
+    //color = pow(color, 1. / gamma);
+    return color;
+}
+
+float3 Uncharted2ToneMapping(float3 color)
+{
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    float W = 11.2;
+    float exposure = 2.;
+    color *= exposure;
+    color = ((color * (A * color + C * B) + D * E) / (color * (A * color + B) + D * F)) - E / F;
+    float white = ((W * (A * W + C * B) + D * E) / (W * (A * W + B) + D * F)) - E / F;
+    color /= white;
+    //color = pow(color, float3(1. / gamma));
+    return color;
+}
+
+float3 filmicToneMapping(float3 color)
+{
+    color = max(0., color - 0.004);
+    color = (color * (6.2 * color + .5)) / (color * (6.2 * color + 1.7) + 0.06);
+    color = pow(color, gamma);
+    return color;
+}
+
+
+float3 ACESFilmicTonemap(float3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float3 TonemapUchimura ( float3 v ) {
+    const float P = 1.0f;  // max display brightness
+    const float a = 1.0f;  // contrast
+    const float m = 0.22f; // linear section start
+    const float l = 0.4f;  // linear section length
+    const float c = 1.33f; // black
+    const float b = 0.0f;  // pedestal
+
+    float l0 = ( ( P - m ) * l ) / a;
+    float L0 = m - m / a;
+    float L1 = m + ( 1.0f - m ) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = ( a * P ) / ( P - S1 );
+    float CP = -C2 / P;
+
+    float3 w0 = 1.0f - smoothstep( 0.0f, m, v );
+    float3 w2 = step( m + l0, v );
+    float3 w1 = 1.0f - w0 - w2;
+
+    float3 T = m * pow(abs(v / m), c ) + b;
+    float3 S = P - ( P - S1 ) * exp( CP * ( v - S0 ) );
+    float3 L = m + a * ( v - m );
+
+    return T * w0 + L * w1 + S * w2;
+}
+
+float3 HejlBurgess(float3 texColor) {
+   texColor *= 1;  // Hardcoded Exposure Adjustment
+   float3 x = max(0,texColor-0.004);
+   float3 retColor = (x*(6.2*x+.5))/(x*(6.2*x+1.7)+0.06);
+   return retColor;
+}
+
+struct ParamsLogC
+{
+    float cut;
+    float a, b, c, d, e, f;
+};
+
+static const ParamsLogC LogC =
+{
+    0.011361, // cut
+    5.555556, // a
+    0.047996, // b
+    0.244161, // c
+    0.386036, // d
+    5.301883, // e
+    0.092819  // f
+};
+
+float LinearToLogC_Precise(half x)
+{
+    float o;
+    if (x > LogC.cut)
+        o = LogC.c * log10(LogC.a * x + LogC.b) + LogC.d;
+    else
+        o = LogC.e * x + LogC.f;
+    return o;
+}
+
+inline float3 AgX(float3 stimulus) {
+    // Apply a non-linear transform that the LUT is encoded with.
+    const float3 encoded = stimulus;// / (stimulus + 1.0);
+
+    // Align the encoded range to texel centers.
+    float3 uv = encoded;
+
+    // Note: for OpenGL, do `uv.y = 1.0 - uv.y`
+    uv = float3(
+        LinearToLogC_Precise(uv.x),
+        LinearToLogC_Precise(uv.y),
+        LinearToLogC_Precise(uv.z)
+    )  * ((LUT_DIMS - 1.0) / LUT_DIMS) + 0.5 / LUT_DIMS;
+
+    return LUT.SampleLevel(sampler_linear_clamp, uv, 0).xyz;
+}
+int screen_width;
+
+[numthreads(16,16,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    float3 result = Result[id.xy].xyz;//
+    [branch]switch(ToneMapSelection) {
+        case 0:
+            result = tony_mc_mapface(result);
+        break;
+        case 1:
+            result = ACESFilmicTonemap(result);
+        break;
+        case 2:
+            result = TonemapUchimura(result);
+        break;
+        case 3:
+            result = lumaBasedReinhardToneMapping(result);
+        break;
+        case 4:
+            result = Uncharted2ToneMapping(result);
+        break;
+        case 5:
+            result = AgX(result);
+        break;
+    };
+    Result[id.xy] = float4(result, 1.0);
+}

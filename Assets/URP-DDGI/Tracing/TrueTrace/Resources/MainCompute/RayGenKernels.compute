@@ -1,0 +1,159 @@
+#include "../GlobalDefines.cginc"
+#ifndef DX11
+    #pragma use_dxc
+#endif
+#include "CommonData.cginc"
+
+#ifdef HDRP
+Texture2DArray<float2> MotionVectors;
+#else
+Texture2D<float2> MotionVectors;
+#endif
+
+
+static const ColData InitCol = { 1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,0};
+const static RayHit tempray = CreateRayHit();
+
+
+bool UseASVGFAndReSTIR;
+#pragma kernel Generate
+[numthreads(16, 16, 1)]
+void Generate(uint3 id : SV_DispatchThreadID) {
+
+    if (id.x >= screen_width || id.y >= screen_height) return;
+    const uint pixel_index = id.y * screen_width + id.x;
+    float2 jitter = ((random(0, pixel_index) - 0.5));
+    if(OIDNGuideWrite || UseASVGFAndReSTIR) jitter = 0;
+    float2 uv = float2((id.xy + jitter) / float2(screen_width, screen_height) * 2.0f - 1.0f);
+    SmallerRay ray = CreateCameraRay(uv, pixel_index);
+    RayData globray = {ray.origin + NearPlane * ray.direction, pixel_index, ray.direction, 0, 0,0,asuint(FarPlane),0};
+    GlobalRays[pixel_index] = globray;
+}
+
+#pragma kernel GIReTraceKernel
+[numthreads(16, 16, 1)]
+void GIReTraceKernel(uint3 id : SV_DispatchThreadID, uint3 id2 : SV_GroupThreadID, uint3 id3 : SV_GroupID, uint id4 : SV_GroupIndex) {
+    if (id.x >= screen_width || id.y >= screen_height) return;
+    const uint pixel_index = id.y * screen_width + id.x;
+
+    float2 uv = float2((id.xy) / float2(screen_width, screen_height));
+    SmallerRay ray = CreateCameraRay(uv * 2.0f - 1.0f, pixel_index);
+    RayData globray = {ray.origin + NearPlane * ray.direction, pixel_index, ray.direction, 0, 0,0,asuint(FarPlane),0};
+    RandomNumsWrite[id.xy] = float4(frames_accumulated, pixel_index, 0, 0);
+
+    if(curframe % ReSTIRGIUpdateRate == pixel_index % ReSTIRGIUpdateRate) {
+        #ifdef HDRP
+            float2 MotionVector = MotionVectors[int3(id.xy,0)].xy;
+        #else
+            float2 MotionVector = MotionVectors.SampleLevel(my_linear_clamp_sampler, uv, 0).xy;
+        #endif
+        int2 prevIndex = int2(floor(((float2(id.xy) + 0.5) * float2(rcp(screen_width), rcp(screen_height)) - MotionVector) * float2(screen_width, screen_height)));
+        if (RandomNums[prevIndex].z == 0 && (ReservoirA[uint3(prevIndex, 0)].w >> 24) != 3 && prevIndex.x >= 0 && prevIndex.x < screen_width && prevIndex.y >= 0 && prevIndex.y < screen_height) {
+            RandomNumsWrite[id.xy] = float4(int2((ReservoirA[uint3(prevIndex, 0)].w & 0x00FFFFFF), ReservoirA[uint3(prevIndex, 0)].z), (ReservoirA[uint3(prevIndex, 0)].w >> 24) + 1,  1);
+        }
+    }
+
+    GlobalRays[pixel_index] = globray;
+}
+
+#pragma kernel GeneratePanorama
+[numthreads(16, 16, 1)]
+void GeneratePanorama(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= screen_width || id.y >= screen_height) return;
+    const uint pixel_index = id.y * screen_width + id.x;
+    float2 jitter = ((random(0, pixel_index) - 0.5));
+    if(OIDNGuideWrite) jitter = 0;
+    float2 uv = float2((id.xy + jitter) / float2(screen_width, screen_height));
+    SmallerRay ray;
+    if(DoPanorama) {
+        uv.y = 1.0f - uv.y;
+        uv.x = (uv.x * (Segment.y - Segment.x)) + Segment.x;
+        uv.x = 1.0f - uv.x;
+
+        ray = CreateRay(mul(CamToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz + NearPlane * normalize(equirectUvToDirection(uv)), normalize(equirectUvToDirection(uv)));
+    } else {
+        uv.x = ((uv.x * (Segment.y - Segment.x)) + Segment.x);
+        uv = (uv * 2.0f) - 1.0f;
+
+        ray = CreateCameraRay(uv, pixel_index);
+        ray.origin = ray.origin + NearPlane * ray.direction;
+    }
+    RayData globray = {ray.origin, pixel_index, ray.direction, 0, 0,0,asuint(FarPlane),0};
+    GlobalRays[pixel_index] = globray;
+}
+
+#pragma kernel CacheResolve
+[numthreads(256, 1, 1)]
+void CacheResolve(uint3 id : SV_DispatchThreadID) {//we dont need to compress the hashes right? since we are only using 4, as long as we set ... no because we DO check for 0th
+#ifdef RadCache
+    //using the hash we should be able to reconstruct SOME kind of... oh
+    /*
+        WE STORE THE 8 BIT POSITIONS IN THE HASH BUFFER
+        we just need to reconstruct the actual hash from prev cam position data?
+
+    */
+
+    uint HashB = HashEntriesBufferB[id.x];
+    bool Valid = HashB != 0;
+    uint ResultantHash = 0;
+    uint4 ResultantVox = 0;
+    if(Valid) {
+        int idd = 0;
+        if(FindHashEntry(HashB, idd)) {
+            ResultantHash = HashB;
+            ResultantVox = VoxelDataBufferB.Load4(idd * 16);
+            uint SampleCount = ResultantVox.w & 0x0000FFFF;
+            uint FrameCount = (ResultantVox.w >> 16) & 0x0000FFFF;
+            FrameCount++;
+            if(SampleCount > 500) {
+                float Ratio = 500.0f / (float)SampleCount;
+                SampleCount = floor(Ratio * (float)SampleCount);
+                ResultantVox.xyz = ResultantVox.xyz * Ratio;
+            }
+            if(FrameCount > 90) {
+                FrameCount = 0;
+                SampleCount = 0;
+                ResultantVox = 0;
+                ResultantHash = 0;
+            }
+            ResultantVox.w = (SampleCount | (FrameCount << 16));
+        }
+    }
+
+    HashEntriesBufferA[id.x] = ResultantHash;
+    VoxelDataBufferA.Store4(id.x * 16, ResultantVox);
+#endif
+}
+
+
+#pragma kernel CacheCompact
+groupshared uint Hashes[64][BucketCount];
+
+[numthreads(64, BucketCount, 1)]
+void CacheCompact(uint3 id : SV_DispatchThreadID, uint3 GT : SV_GroupThreadID) {//we dont need to compress the hashes right? since we are only using 4, as long as we set ... no because we DO check for 0th
+#ifdef RadCache
+    Hashes[GT.x][GT.y] = HashEntriesBufferA[id.x * BucketCount + GT.y];
+    GroupMemoryBarrierWithGroupSync();
+    if(GT.y == 0) {
+        bool FoundZero = false;
+        bool FoundInconsistancy = false;
+        uint LocalBucket[BucketCount];
+        for(int i = 0; i < BucketCount; i++) LocalBucket[i] = 0;
+        uint CurCount = 0;
+        for(int i = 0; i < BucketCount; i++) {
+            if(Hashes[GT.x][i] == 0) FoundZero = true;
+            else {
+                LocalBucket[CurCount++] = Hashes[GT.x][i];
+                if(FoundZero) FoundInconsistancy = true;
+            }
+        }
+        if(FoundInconsistancy) {
+            for(int i = 0; i < BucketCount; i++) {
+                Hashes[GT.x][i] = LocalBucket[i];
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    HashEntriesBufferA[id.x * BucketCount + GT.y] = Hashes[GT.x][GT.y];
+#endif
+}

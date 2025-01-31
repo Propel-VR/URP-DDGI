@@ -1,0 +1,668 @@
+#define KernelRatio 256
+#include "../GlobalDefines.cginc"
+#include "../MainCompute/CommonStructs.cginc"
+#pragma warning( disable : 3556)
+
+#pragma kernel Construct
+
+StructuredBuffer<int> CWBVHIndices;
+ByteAddressBuffer bufVertices;
+
+ByteAddressBuffer bufIndexes;
+
+uint gVertexCount;
+
+int VertOffset;
+
+float4x4 Transform;
+float4x4 Transform2;
+
+float3 Offset;
+
+float3 Scale;
+
+
+struct BoundingBox {
+	float3 BBMax;
+	float3 BBMin;
+};
+RWStructuredBuffer<BoundingBox> Boxs;
+
+StructuredBuffer<CudaTriangle> CudaTriArrayIN;
+RWStructuredBuffer<CudaTriangle> CudaTriArray;
+
+uint octahedral_32(float3 nor) {
+	float oct = 1.0f / (abs(nor.x) + abs(nor.y) + abs(nor.z));
+	float t = saturate(-nor.z);
+	nor.xy = (nor.xy + (nor.xy > 0.0f ? t : -t)) * oct;
+    uint2 d = uint2(round(32767.5 + nor.xy*32767.5));  
+    return d.x|(d.y<<16u);
+}
+
+int Stride;
+int TriBuffOffset;
+
+groupshared float3 Pos[KernelRatio * 3];
+groupshared uint Norm[KernelRatio * 3];
+
+[numthreads(KernelRatio, 3, 1)]
+void Construct(uint3 id : SV_DispatchThreadID, uint3 gt : SV_GroupThreadID)
+{
+	const bool ValidRunning = id.x < gVertexCount;
+	gt.x *= 3;
+	Pos[gt.x + gt.y] = 0;
+	Norm[gt.x + gt.y] = 0;
+	[branch]if(ValidRunning) {
+		const uint vidx = bufIndexes.Load(id.x * 12 + gt.y * 4) * Stride;
+		Pos[gt.x + gt.y] = mul(Transform, float4(asfloat(bufVertices.Load3((vidx) << 2)),1)).xyz;
+		Norm[gt.x + gt.y] = octahedral_32(normalize(mul((float3x3)Transform, asfloat(bufVertices.Load3((vidx + 3) << 2)))));
+		id.x = CWBVHIndices[VertOffset + id.x];
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if(ValidRunning) {
+		[branch]if(gt.y == 1) {
+			float3 BBMax = max(max(Pos[gt.x], Pos[gt.x + 1]), Pos[gt.x + 2]);
+			float3 BBMin = min(min(Pos[gt.x], Pos[gt.x + 1]), Pos[gt.x + 2]);
+			[unroll] for (int i2 = 0; i2 < 3; i2++) {
+				if (BBMax[i2] - BBMin[i2] < 0.00001f) {
+					BBMin[i2] -= 0.00001f;
+					BBMax[i2] += 0.00001f;
+				}
+			}
+
+			Boxs[id.x].BBMax = BBMax;
+			Boxs[id.x].BBMin = BBMin;
+		} else if(gt.y == 0) {
+			CudaTriArray[id.x + TriBuffOffset].pos0 = Pos[gt.x];
+			CudaTriArray[id.x + TriBuffOffset].posedge1 = Pos[gt.x + 2] - Pos[gt.x];
+		} else if(gt.y == 2) {
+			CudaTriArray[id.x + TriBuffOffset].posedge2 = Pos[gt.x + 1] - Pos[gt.x];
+			CudaTriArray[id.x + TriBuffOffset].norms = uint3(Norm[gt.x], Norm[gt.x + 2], Norm[gt.x + 1]);
+		}
+	}
+
+
+
+}
+
+#pragma kernel TransferKernel
+
+RWStructuredBuffer<LightTriData> LightTrianglesOut;
+int LightTriBuffOffset;
+[numthreads(KernelRatio, 1, 1)]
+void TransferKernel(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= gVertexCount)
+		return;
+
+	CudaTriangle TempTri = CudaTriArrayIN[LightTrianglesOut[id.x + LightTriBuffOffset].TriTarget + TriBuffOffset];
+
+	LightTrianglesOut[id.x + LightTriBuffOffset].pos0 = TempTri.pos0;
+	LightTrianglesOut[id.x + LightTriBuffOffset].posedge1 = TempTri.posedge1;
+	LightTrianglesOut[id.x + LightTriBuffOffset].posedge2 = TempTri.posedge2;
+
+}
+
+
+
+
+
+struct NodeIndexPairData {
+	float3 BBMax;//24
+	float3 BBMin;//36
+	int BVHNode;//8
+	int InNodeOffset;//40
+};
+
+RWStructuredBuffer<NodeIndexPairData> AllNodes;
+
+StructuredBuffer<int2> TriPair;
+
+
+#pragma kernel RefitLayer
+
+
+
+struct Layer {
+	int Children[8];
+};
+StructuredBuffer<Layer> ReverseStack;
+
+uint NodeCount;
+
+StructuredBuffer<int> WorkingBuffer;
+[numthreads(KernelRatio, 1, 1)]
+void RefitLayer(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x > NodeCount)
+		return;
+		id.x = WorkingBuffer[id.x];
+	float3 RunningMax = -99999999.0f;//AllNodes[id.x].BBMax;
+	float3 RunningMin = 99999999.0f;//AllNodes[id.x].BBMin;
+	const Layer CurrentLayer = ReverseStack[id.x];
+	int Stack[8];
+	int stack_count = 0;
+	int i;
+	int i4;
+	[unroll]
+	for (i = 0; i < 8; i++) {
+		const int Leaf = CurrentLayer.Children[i];
+		if(Leaf == 0) continue;
+		[branch] if (Leaf < 0) {
+			RunningMax = max(RunningMax, AllNodes[(-Leaf) - 1].BBMax);
+			RunningMin = min(RunningMin, AllNodes[(-Leaf) - 1].BBMin);
+		} else {
+			Stack[stack_count++] = Leaf-1;
+		}
+	}
+	for(i = 0; i < stack_count; i++) {
+		int Start = Stack[i] / 24;
+		int End = Start + Stack[i] % 24;
+		for (i4 = Start; i4 < End; i4++) {
+			RunningMax = max(RunningMax, Boxs[i4].BBMax);
+			RunningMin = min(RunningMin, Boxs[i4].BBMin);
+		}
+	}
+
+	AllNodes[id.x].BBMax = RunningMax;
+	AllNodes[id.x].BBMin = RunningMin;
+
+}
+#pragma kernel RefitBVHLayer
+StructuredBuffer<int> TLASCWBVHIndices;
+[numthreads(KernelRatio, 1, 1)]
+void RefitBVHLayer(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x > NodeCount)
+		return;
+		id.x = WorkingBuffer[id.x];
+	float3 RunningMax = -99999999.0f;//AllNodes[id.x].BBMax;
+	float3 RunningMin = 99999999.0f;//AllNodes[id.x].BBMin;
+	const Layer CurrentLayer = ReverseStack[id.x];
+	int Stack[8];
+	int stack_count = 0;
+	int i;
+	int i4;
+	[unroll]
+	for (i = 0; i < 8; i++) {
+		const int Leaf = CurrentLayer.Children[i];
+		if(Leaf == 0) continue;
+		[branch] if (Leaf < 0) {
+			RunningMax = max(RunningMax, AllNodes[(-Leaf) - 1].BBMax);
+			RunningMin = min(RunningMin, AllNodes[(-Leaf) - 1].BBMin);
+		} else {
+			Stack[stack_count++] = Leaf-1;
+		}
+	}
+	for(i = 0; i < stack_count; i++) {
+		int Start = Stack[i] / 24;
+		int End = Start + Stack[i] % 24;
+		for (i4 = Start; i4 < End; i4++) {
+			RunningMax = max(RunningMax, Boxs[TLASCWBVHIndices[i4]].BBMax);
+			RunningMin = min(RunningMin, Boxs[TLASCWBVHIndices[i4]].BBMin);
+		}
+	}
+
+	AllNodes[id.x].BBMax = RunningMax;
+	AllNodes[id.x].BBMin = RunningMin;
+
+}
+
+
+#pragma kernel NodeUpdate
+
+struct BVHNode8DataUnpacked {
+	float3 p;//12
+	uint e[3];//24
+	uint imask;//28    
+	uint base_index_child;//32;
+	uint base_index_triangle;//36;
+	uint meta[8];
+	uint quantized_min_x[8];
+	uint quantized_max_x[8];
+	uint quantized_min_y[8];
+	uint quantized_max_y[8];
+	uint quantized_min_z[8];
+	uint quantized_max_z[8];//2
+};
+
+StructuredBuffer<int> ToBVHIndex;
+
+RWStructuredBuffer<BVHNode8DataUnpacked> BVHNodes;
+
+
+[numthreads(KernelRatio, 1, 1)]
+void NodeUpdate(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= NodeCount || id.x == 0)
+		return;
+	NodeIndexPairData TempNode = AllNodes[id.x];
+	int NodeLink = ToBVHIndex[TempNode.BVHNode];
+	BVHNode8DataUnpacked TempBVHNode = BVHNodes[TempNode.BVHNode];
+	float3 BBMax = AllNodes[NodeLink].BBMax;
+	float3 BBMin = AllNodes[NodeLink].BBMin;
+	[branch] if (TempNode.BBMax.x < -10000.0f) {
+		TempNode.BBMax = BBMin;
+		TempNode.BBMin = BBMin;
+	}
+	const uint BVHNodeOffset = TempNode.BVHNode;
+	float3 e = pow(2, ceil(log2((BBMax - BBMin) * 0.003921569f)));
+	float3 p = BBMin;
+	const uint3 Max = ceil((TempNode.BBMax - p) / e);
+	const uint3 Min = floor((TempNode.BBMin - p) / e);
+	BVHNodes[BVHNodeOffset].p = p;
+	uint u_ex = asuint(e.x);
+	uint u_ey = asuint(e.y);
+	uint u_ez = asuint(e.z);
+	const uint NodeOffset = TempNode.InNodeOffset;
+	BVHNodes[BVHNodeOffset].e[0] = u_ex >> 23;
+	BVHNodes[BVHNodeOffset].e[1] = u_ey >> 23;
+	BVHNodes[BVHNodeOffset].e[2] = u_ez >> 23;
+	BVHNodes[BVHNodeOffset].quantized_max_x[NodeOffset] = Max.x;
+	BVHNodes[BVHNodeOffset].quantized_max_y[NodeOffset] = Max.y;
+	BVHNodes[BVHNodeOffset].quantized_max_z[NodeOffset] = Max.z;
+	BVHNodes[BVHNodeOffset].quantized_min_x[NodeOffset] = Min.x;
+	BVHNodes[BVHNodeOffset].quantized_min_y[NodeOffset] = Min.y;
+	BVHNodes[BVHNodeOffset].quantized_min_z[NodeOffset] = Min.z;
+
+
+
+}
+
+
+
+
+
+#pragma kernel NodeCompress
+
+
+RWStructuredBuffer<BVHNode8Data> AggNodes;
+
+
+int NodeOffset;
+[numthreads(KernelRatio, 1, 1)]
+void NodeCompress(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= NodeCount)
+		return;
+	const BVHNode8DataUnpacked TempNode = BVHNodes[id.x];
+	BVHNode8Data TempBVHNode;
+
+	TempBVHNode.nodes[0] = uint4(asuint(TempNode.p.x),
+								asuint(TempNode.p.y),
+								asuint(TempNode.p.z),
+								(TempNode.e[0] | (TempNode.e[1] << 8) | (TempNode.e[2] << 16) | (TempNode.imask << 24)));
+
+	TempBVHNode.nodes[1] = uint4(TempNode.base_index_child,
+							TempNode.base_index_triangle,
+							(TempNode.meta[0] | (TempNode.meta[1] << 8) | (TempNode.meta[2] << 16) | (TempNode.meta[3] << 24)),
+							(TempNode.meta[4] | (TempNode.meta[5] << 8) | (TempNode.meta[6] << 16) | (TempNode.meta[7] << 24)));
+	TempBVHNode.nodes[2] = uint4((TempNode.quantized_min_x[0] | (TempNode.quantized_min_x[1] << 8) | (TempNode.quantized_min_x[2] << 16) | (TempNode.quantized_min_x[3] << 24)),
+							(TempNode.quantized_max_x[0] | (TempNode.quantized_max_x[1] << 8) | (TempNode.quantized_max_x[2] << 16) | (TempNode.quantized_max_x[3] << 24)),
+							(TempNode.quantized_min_x[4] | (TempNode.quantized_min_x[5] << 8) | (TempNode.quantized_min_x[6] << 16) | (TempNode.quantized_min_x[7] << 24)),
+							(TempNode.quantized_max_x[4] | (TempNode.quantized_max_x[5] << 8) | (TempNode.quantized_max_x[6] << 16) | (TempNode.quantized_max_x[7] << 24)));
+	TempBVHNode.nodes[3] = uint4((TempNode.quantized_min_y[0] | (TempNode.quantized_min_y[1] << 8) | (TempNode.quantized_min_y[2] << 16) | (TempNode.quantized_min_y[3] << 24)),
+							(TempNode.quantized_max_y[0] | (TempNode.quantized_max_y[1] << 8) | (TempNode.quantized_max_y[2] << 16) | (TempNode.quantized_max_y[3] << 24)),
+							(TempNode.quantized_min_y[4] | (TempNode.quantized_min_y[5] << 8) | (TempNode.quantized_min_y[6] << 16) | (TempNode.quantized_min_y[7] << 24)),
+							(TempNode.quantized_max_y[4] | (TempNode.quantized_max_y[5] << 8) | (TempNode.quantized_max_y[6] << 16) | (TempNode.quantized_max_y[7] << 24)));
+	TempBVHNode.nodes[4] = uint4((TempNode.quantized_min_z[0] | (TempNode.quantized_min_z[1] << 8) | (TempNode.quantized_min_z[2] << 16) | (TempNode.quantized_min_z[3] << 24)),
+							(TempNode.quantized_max_z[0] | (TempNode.quantized_max_z[1] << 8) | (TempNode.quantized_max_z[2] << 16) | (TempNode.quantized_max_z[3] << 24)),
+							(TempNode.quantized_min_z[4] | (TempNode.quantized_min_z[5] << 8) | (TempNode.quantized_min_z[6] << 16) | (TempNode.quantized_min_z[7] << 24)),
+							(TempNode.quantized_max_z[4] | (TempNode.quantized_max_z[5] << 8) | (TempNode.quantized_max_z[6] << 16) | (TempNode.quantized_max_z[7] << 24)));
+	AggNodes[id.x + NodeOffset] = TempBVHNode;
+}
+
+
+
+
+
+#pragma kernel NodeInitializer
+
+
+
+[numthreads(KernelRatio, 1, 1)]
+void NodeInitializer(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x > NodeCount)
+		return;
+
+	AllNodes[id.x].BBMax = -9999999999.0f;
+	AllNodes[id.x].BBMin = 9999999999.0f;
+
+
+}
+
+
+
+// ---------------------------------------------------------------------- //
+//Light BVH refits
+
+#pragma kernel TLASSGTreeRefitKernel
+
+
+
+float3 i_octahedral_32( uint data ) {
+    uint2 iv = uint2( data, data>>16u ) & 65535u; 
+    float2 v = iv/32767.5f - 1.0f;
+    float3 nor = float3(v, 1.0f - abs(v.x) - abs(v.y)); // Rune Stubbe's version,
+    float t = max(-nor.z,0.0);                     // much faster than original
+    nor.xy += (nor.xy>=0.0)?-t:t;                     // implementation of this
+    return normalize( nor );
+}
+
+
+
+RWStructuredBuffer<GaussianTreeNode> SGTreeWrite;
+RWStructuredBuffer<LightBVHData> LightNodesWrite;
+StructuredBuffer<int> WorkingSet;
+int SetCount;
+int ObjectOffset;
+
+
+inline float luminance(const float3 a) {
+    return dot(float3(0.299f, 0.587f, 0.114f), a);
+}
+
+
+
+float AngleBetween(float3 v1, float3 v2) {
+    if(dot(v1, v2) < 0) return 3.14159f - 2.0f * asin(length(v1 + v2) / 2.0f);
+    else return 2.0f * asin(length(v2 - v1) / 2.0f);
+}
+
+
+float4x4 Rotate(float sinTheta, float cosTheta, float3 axis) {
+    float3 a = normalize(axis);
+    float4x4 m;
+    m[0][0] = a.x * a.x + (1 - a.x * a.x) * cosTheta;
+    m[0][1] = a.x * a.y * (1 - cosTheta) - a.z * sinTheta;
+    m[0][2] = a.x * a.z * (1 - cosTheta) + a.y * sinTheta;
+    m[0][3] = 0;
+
+    m[1][0] = a.x * a.y * (1 - cosTheta) + a.z * sinTheta;
+    m[1][1] = a.y * a.y + (1 - a.y * a.y) * cosTheta;
+    m[1][2] = a.y * a.z * (1 - cosTheta) - a.x * sinTheta;
+    m[1][3] = 0;
+
+    m[2][0] = a.x * a.z * (1 - cosTheta) - a.y * sinTheta;
+    m[2][1] = a.y * a.z * (1 - cosTheta) + a.x * sinTheta;
+    m[2][2] = a.z * a.z + (1 - a.z * a.z) * cosTheta;
+    m[2][3] = 0;
+
+    m[3][0] = 0;
+    m[3][1] = 0;
+    m[3][2] = 0;
+    m[3][3] = 1;
+
+return mul(m, transpose(m));
+}
+
+float4x4 Rotate(float Theta, float3 axis) {
+    return Rotate(sin(Theta), cos(Theta), axis);
+}
+float GetCosThetaO(uint cosTheta) {
+    return (2.0f * ((float)(cosTheta & 0x0000FFFF) / 32767.0f) - 1.0f);
+}
+float GetCosThetaE(uint cosTheta) {
+    return (2.0f * ((float)(cosTheta >> 16) / 32767.0f) - 1.0f);
+}
+uint CompCosTheta(float cosTheta_o, float cosTheta_e) {
+    return (uint)floor(32767.0f * ((cosTheta_o + 1.0f) / 2.0f)) | ((uint)floor(32767.0f * ((cosTheta_e + 1.0f) / 2.0f)) << 16);
+}
+
+inline float4 DoCone(float4 A, float4 B) {
+    if(all(A.xyz == 0)) return B;
+    if(all(B.xyz == 0)) return A;
+    
+    float theta_a = acos(A.w);
+    float theta_b = acos(B.w);
+    float theta_d = AngleBetween(A.xyz, B.xyz);
+    if(min(theta_d + theta_b, 3.14159f) <= theta_a) return A;
+    if(min(theta_d + theta_a, 3.14159f) <= theta_b) return B;
+
+    float theta_o = (theta_a + theta_d + theta_b) / 2.0f;
+    if(theta_o >= 3.14159f) return float4(0,0,0,-1);
+
+    float theta_r = theta_o - theta_a;
+    float3 wr = cross(A.xyz, B.xyz);
+    if(dot(wr, wr) == 0) return float4(0,0,0,-1);
+    float3 w = mul(Rotate(theta_r, wr), float4(A.xyz,0)).xyz;
+    return float4(w, cos(theta_o));
+}
+
+
+inline LightBVHData Union(const LightBVHData A, const LightBVHData B, int Left) {
+    float4 Cone = DoCone(float4(i_octahedral_32(A.w), GetCosThetaO(A.cosTheta_oe)), float4(i_octahedral_32(B.w), GetCosThetaO(B.cosTheta_oe)));
+    float cosTheta_o = Cone.w;
+    float cosTheta_e = min(GetCosThetaE(A.cosTheta_oe), GetCosThetaE(B.cosTheta_oe));
+    LightBVHData Dat = {max(A.BBMax, B.BBMax), min(A.BBMin, B.BBMin), octahedral_32(Cone.xyz), A.phi + B.phi, CompCosTheta(cosTheta_o, cosTheta_e), Left};
+    return Dat;
+}
+
+
+inline float expm1_over_x(const float x)
+{
+	const float u = exp(x);
+
+	if (u == 1.0)
+	{
+		return 1.0;
+	}
+
+	const float y = u - 1.0;
+
+	if (abs(x) < 1.0)
+	{
+		return y / log(u);
+	}
+
+	return y / x;
+}
+
+
+inline float SGIntegral(const float sharpness)
+{
+	return 4.0 * 3.14159f * expm1_over_x(-2.0 * sharpness);
+}
+
+
+inline GaussianTreeNode UnionSG(const GaussianTreeNode LeftNode, const GaussianTreeNode RightNode, int Left) {
+    
+    float phi_left = LeftNode.intensity;    
+    float phi_right = RightNode.intensity;    
+    float w_left = phi_left / (phi_left + phi_right);
+    float w_right = phi_right / (phi_left + phi_right);
+    
+    float3 V = w_left * LeftNode.axis + w_right * RightNode.axis;//may be wrong, paper uses BAR_V(BAR_axis here), not just normalized V/axis
+
+    float3 mean = w_left * LeftNode.position + w_right * RightNode.position;
+    float variance = w_left * LeftNode.variance + w_right * RightNode.variance + w_left * w_right * dot(LeftNode.position - RightNode.position, LeftNode.position - RightNode.position);
+
+    float intensity = LeftNode.intensity + RightNode.intensity;
+
+    float radius = max(distance(mean, LeftNode.position) + LeftNode.radius, distance(mean, RightNode.position) + RightNode.radius);
+
+    float VLength = length(V);
+	float sharpness = ((3.0f * VLength - VLength * VLength * VLength)) / (1.0f - VLength * VLength);
+
+
+	GaussianTreeNode Dat = {mean, radius, V, variance, sharpness, intensity, Left};
+    return Dat;
+}
+
+struct Transfer {
+    float4x4 Transf2;
+    int SolidOffset;
+};
+
+StructuredBuffer<Transfer> Transfers;
+
+float3 transform_position(float4x4 mat, float3 position)
+{
+    return float3(
+        mat[0][0] * position.x + mat[0][1] * position.y + mat[0][2] * position.z + mat[0][3],
+        mat[1][0] * position.x + mat[1][1] * position.y + mat[1][2] * position.z + mat[1][3],
+        mat[2][0] * position.x + mat[2][1] * position.y + mat[2][2] * position.z + mat[2][3]);
+}
+float3 transform_direction(float4x4 mat, float3 direction)
+{
+    return float3(
+        abs(mat[0][0]) * direction.x + abs(mat[0][1]) * direction.y + abs(mat[0][2]) * direction.z,
+        abs(mat[1][0]) * direction.x + abs(mat[1][1]) * direction.y + abs(mat[1][2]) * direction.z,
+        abs(mat[2][0]) * direction.x + abs(mat[2][1]) * direction.y + abs(mat[2][2]) * direction.z
+    );
+}
+
+[numthreads(256,1,1)]
+void TLASSGTreeRefitKernel (uint3 id : SV_DispatchThreadID)
+{
+    if(id.x > (uint)SetCount) return;
+    const int Index = WorkingSet[id.x];
+    GaussianTreeNode Node = SGTreeWrite[Index];
+    if(Node.left < 0) {
+        Transfer Transf = Transfers[-(Node.left+1)];
+        float3 ExtendedCenter = transform_position(Transf.Transf2, SGTreeWrite[Transf.SolidOffset].position + float3(SGTreeWrite[Transf.SolidOffset].radius, 0, 0));
+        float3 center = transform_position(Transf.Transf2, SGTreeWrite[Transf.SolidOffset].position);
+        float3 axis = transform_direction(Transf.Transf2, SGTreeWrite[Transf.SolidOffset].axis);
+        float Scale = length(center - ExtendedCenter) / SGTreeWrite[Transf.SolidOffset].radius;
+
+        SGTreeWrite[Index].position = center;
+        SGTreeWrite[Index].axis = axis;
+        SGTreeWrite[Index].variance = SGTreeWrite[Transf.SolidOffset].variance * Scale;
+        SGTreeWrite[Index].sharpness = SGTreeWrite[Transf.SolidOffset].sharpness;
+        
+
+        SGTreeWrite[Index].radius = SGTreeWrite[Transf.SolidOffset].radius * Scale;
+        SGTreeWrite[Index].intensity = SGTreeWrite[Transf.SolidOffset].intensity * Scale * Scale;
+        return;
+    }
+    GaussianTreeNode LeftNode = SGTreeWrite[Node.left];
+
+    SGTreeWrite[Index] = UnionSG(LeftNode, SGTreeWrite[Node.left + 1], Node.left);
+
+}
+
+
+
+
+
+#pragma kernel TLASLightBVHRefitKernel
+
+[numthreads(256,1,1)]
+void TLASLightBVHRefitKernel (uint3 id : SV_DispatchThreadID)
+{
+    if(id.x > (uint)SetCount) return;
+    const int Index = WorkingSet[id.x];
+    LightBVHData Node = LightNodesWrite[Index];
+    if(Node.left < 0) {
+        Transfer Transf = Transfers[-(Node.left+1)];
+        float3 center = transform_position(Transf.Transf2, (LightNodesWrite[Transf.SolidOffset].BBMax + LightNodesWrite[Transf.SolidOffset].BBMin) / 2.0f);
+        float3 extent = transform_direction(Transf.Transf2, (LightNodesWrite[Transf.SolidOffset].BBMax - LightNodesWrite[Transf.SolidOffset].BBMin) / 2.0f);
+        LightNodesWrite[Index].BBMax = center + extent;
+        LightNodesWrite[Index].BBMin = center - extent;
+        LightNodesWrite[Index].w = octahedral_32(transform_direction(Transf.Transf2, i_octahedral_32(LightNodesWrite[Transf.SolidOffset].w)));
+        LightNodesWrite[Index].phi = max(LightNodesWrite[Transf.SolidOffset].phi,0.000000f);
+        LightNodesWrite[Index].cosTheta_oe = LightNodesWrite[Transf.SolidOffset].cosTheta_oe;
+        return;
+    }
+    LightBVHData LeftNode = LightNodesWrite[Node.left];
+
+    LightNodesWrite[Index] = Union(LeftNode, LightNodesWrite[Node.left + 1], Node.left);
+
+}
+
+
+
+
+float3 unpackRGBE(uint x)
+{
+    int exponent = int(x >> 27) - 20;
+    float scale = pow(2, exponent) / 256.0;
+
+    float3 v;
+    v.r = float(x & 0x1ff) * scale;
+    v.g = float((x >> 9) & 0x1ff) * scale;
+    v.b = float((x >> 18) & 0x1ff) * scale;
+
+    return v;
+}
+
+
+#pragma kernel BLASSGTreeRefitKernel
+
+int TotalNodeOffset;
+
+inline float AreaOfTriangle(float3 pt1, float3 pt2, float3 pt3) {
+    float a = distance(pt1, pt2);
+    float b = distance(pt2, pt3);
+    float c = distance(pt3, pt1);
+    float s = (a + b + c) / 2.0f;
+    return sqrt(s * (s - a) * (s - b) * (s - c));
+}
+float4x4 ToWorld;
+
+[numthreads(256,1,1)]
+void BLASSGTreeRefitKernel (uint3 id : SV_DispatchThreadID)
+{
+    if(id.x > (uint)SetCount) return;
+    const int Index = WorkingSet[id.x] + TotalNodeOffset;
+    GaussianTreeNode Node = SGTreeWrite[Index];
+    if(Node.left < 0) {
+        LightTriData LightTri = LightTriangles[-(Node.left+1) + LightTriBuffOffset];
+        float3 mean = (LightTri.pos0 + (LightTri.pos0 + LightTri.posedge1) + (LightTri.pos0 + LightTri.posedge2)) / 3.0f;
+        float radius = max(max(distance(mean, LightTri.pos0), distance(mean, LightTri.pos0 + LightTri.posedge1)), distance(mean, LightTri.pos0 + LightTri.posedge2));
+
+
+        float area = AreaOfTriangle(LightTri.pos0, LightTri.pos0 + LightTri.posedge1, LightTri.pos0 + LightTri.posedge2);
+
+        if(area == 0) area = 0.000000001f;
+        float intensity = LightTri.SourceEnergy * area;
+        float3 V = 0.5f * normalize(cross(normalize(LightTri.posedge1), normalize(LightTri.posedge2)));
+        float variance = (dot(LightTri.posedge1, LightTri.posedge1) + dot(LightTri.posedge2, LightTri.posedge2) - dot(LightTri.posedge1, LightTri.posedge2)) / 18.0f;
+
+        SGTreeWrite[Index].sharpness = ((3.0f * length(V) - pow(length(V), 3))) / (1.0f - pow(length(V), 2));
+        SGTreeWrite[Index].position = mean;
+        SGTreeWrite[Index].radius = radius;
+        SGTreeWrite[Index].intensity = intensity;
+        SGTreeWrite[Index].variance = variance;
+        SGTreeWrite[Index].axis = V;
+        return;
+    }
+    GaussianTreeNode LeftNode = SGTreeWrite[Node.left + TotalNodeOffset];
+
+    SGTreeWrite[Index] = UnionSG(LeftNode, SGTreeWrite[Node.left + 1 + TotalNodeOffset], Node.left);
+
+}
+
+#pragma kernel BLASLightRefitKernel
+
+[numthreads(256,1,1)]
+void BLASLightRefitKernel (uint3 id : SV_DispatchThreadID)
+{
+    if(id.x > (uint)SetCount) return;
+    const int Index = WorkingSet[id.x] + TotalNodeOffset;
+    LightBVHData Node = LightNodesWrite[Index];
+    if(Node.left < 0) {
+        LightTriData LightTri = LightTriangles[-(Node.left+1) + LightTriBuffOffset];
+        float3 BBMax = max(max(LightTri.pos0, LightTri.pos0 + LightTri.posedge1), LightTri.pos0 + LightTri.posedge2);
+        float3 BBMin = min(min(LightTri.pos0, LightTri.pos0 + LightTri.posedge1), LightTri.pos0 + LightTri.posedge2);
+        [unroll]for(int i = 0; i < 3; i++) {
+            if(abs(BBMax[i] - BBMin[i]) < 0.0001f) {
+                BBMax[i] += 0.0001f;
+                BBMin[i] -= 0.0001f;
+            }
+        }
+        LightNodesWrite[Index].BBMax = BBMax;
+        LightNodesWrite[Index].BBMin = BBMin;
+        LightNodesWrite[Index].w = octahedral_32(-normalize(cross(normalize(LightTri.posedge1), normalize(LightTri.posedge2))));
+        float area = AreaOfTriangle(mul(ToWorld, float4(LightTri.pos0,1)), mul(ToWorld, float4(LightTri.pos0 + LightTri.posedge1,1)), mul(ToWorld, float4(LightTri.pos0 + LightTri.posedge2,1)));
+        if(area == 0) area = 0.000000001f;
+
+        LightNodesWrite[Index].phi = LightTri.SourceEnergy * area;   
+        // LightNodesWrite[Index].phi = max(AreaOfTriangle(LightTri.pos0, LightTri.pos0 + LightTri.posedge1, LightTri.pos0 + LightTri.posedge2),0.00000001f);   
+        return;
+    }
+    LightBVHData LeftNode = LightNodesWrite[Node.left + TotalNodeOffset];
+
+    LightNodesWrite[Index] = Union(LeftNode, LightNodesWrite[Node.left + 1 + TotalNodeOffset], Node.left);
+}

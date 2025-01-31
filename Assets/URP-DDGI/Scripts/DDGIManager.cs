@@ -37,6 +37,7 @@ namespace DDGIURP
         [ReadOnly, SerializeField] float memoryUsageInMB;
         [ReadOnly, SerializeField] RenderTexture irradianceTex;
         [ReadOnly, SerializeField] RenderTexture visibilityTex;
+        [ReadOnly, SerializeField] RenderTexture tracedTargetTex;
 
         DDGIDebugProbeRenderer debugProbeRenderer;
         int irrResPad;
@@ -90,18 +91,6 @@ namespace DDGIURP
             debugProbeRenderer.UpdateLayout(this, probeDimensions, probeDensity, boxCenter, boxSize, irrResPad, irradianceResolution);
         }
 
-        public void Cleanup ()
-        {
-            if(irradianceTex)
-            {
-                DestroyImmediate(irradianceTex);
-            }
-            if(visibilityTex)
-            {
-                DestroyImmediate(visibilityTex);
-            }
-        }
-
         public void Allocate ()
         {
             if (memoryUsageInMB > maxMemoryUsageMB) return;
@@ -151,7 +140,27 @@ namespace DDGIURP
             };
             visibilityTex.Create();
 
+            tracedTargetTex = new RenderTexture(
+                width: 4096,
+                height: 4096,
+                depth: 0,
+                format: GraphicsFormat.R16G16B16A16_SFloat,
+                mipCount: 0
+            )
+            {
+                name = "DDGI Traced Results",
+                dimension = TextureDimension.Tex2DArray,
+                volumeDepth = 1,
+            };
+
             Debug.Log("Recreated Textures");
+        }
+
+        public void Cleanup()
+        {
+            if (irradianceTex) DestroyImmediate(irradianceTex);
+            if (visibilityTex) DestroyImmediate(visibilityTex);
+            if (tracedTargetTex) DestroyImmediate(tracedTargetTex);
         }
 
         [Button]

@@ -1,0 +1,1064 @@
+#include "../GlobalDefines.cginc"
+#ifndef DX11
+    #pragma use_dxc
+    // #pragma enable_d3d11_debug_symbols
+#endif
+#include "CommonData.cginc"
+#ifdef HardwareRT
+    #include "UnityRayQuery.cginc"
+    #pragma require inlineraytracing
+    RaytracingAccelerationStructure myAccelerationStructure;
+#endif
+
+RWTexture2D<uint4> _PrimaryTriangleInfo;
+#pragma kernel kernel_trace 
+
+inline void IntersectTriangle(int mesh_id, const int tri_id, const SmallerRay ray, inout RayHit ray_hit, const int MatOffset, const float RandNum) {
+    TrianglePos tri = triangle_get_positions(tri_id);
+    TriangleUvs tri2 = triangle_get_positions2(tri_id);
+    int MaterialIndex = (MatOffset + AggTris[tri_id].MatDat);
+
+    float3 h = cross(ray.direction, tri.posedge2);
+    float  a = dot(tri.posedge1, h);
+
+    float  f = rcp(a);
+    float3 s = ray.origin - tri.pos0;
+    float  u = f * dot(s, h);
+
+    if (u >= 0.0f && u <= 1.0f) {
+        float3 q = cross(s, tri.posedge1);
+        float  v = f * dot(ray.direction, q);
+
+        if (v >= 0.0f && u + v <= 1.0f) {
+            float t = f * dot(tri.posedge2, q);
+
+            if (t > 0 && t < ray_hit.t) {
+                //major slowdown
+                #ifdef AdvancedAlphaMapped
+                    if(_Materials[MaterialIndex].MatType == CutoutIndex) {
+                        float2 BaseUv = tri2.pos0 * (1.0f - u - v) + tri2.posedge1 * u + tri2.posedge2 * v;
+                        if(_Materials[MaterialIndex].AlphaTex.x > 0) 
+                            if(SampleTexture(BaseUv, SampleAlpha, _Materials[MaterialIndex]).x < _Materials[MaterialIndex].AlphaCutoff) return;
+                    }
+                #endif
+                #ifdef IgnoreGlassMain
+                    if(_Materials[MaterialIndex].specTrans == 1) return;
+                #endif
+                #ifdef IgnoreBackfacing
+                    if(_Materials[MaterialIndex].specTrans != 1 && dot(normalize(cross(normalize(tri.posedge1), normalize(tri.posedge2))), ray.direction) <= 0) return;
+                #endif
+                #ifdef FadeMapping
+                    if(_Materials[MaterialIndex].MatType == FadeIndex) {
+                        float2 BaseUv = tri2.pos0 * (1.0f - u - v) + tri2.posedge1 * u + tri2.posedge2 * v;
+                        if(_Materials[MaterialIndex].AlphaTex.x > 0)
+                            if(SampleTexture(BaseUv, SampleAlpha, _Materials[MaterialIndex]).x - _Materials[MaterialIndex].AlphaCutoff <= RandNum) return;
+                    }
+                #endif
+                if(CurBounce == 0 && GetFlag(_Materials[MaterialIndex].Tag, Invisible)) return;
+                ray_hit.t = t;
+                ray_hit.u = u;
+                ray_hit.v = v;
+                ray_hit.mesh_id = mesh_id;
+                ray_hit.triangle_id = tri_id;
+            }
+        }
+    }
+}
+
+
+void IntersectBVH(int ray_index) {
+    if(ray_index >= BufferSizes[CurBounce].tracerays) return;
+    RayHit bestHit;
+    SmallerRay ray;
+    #ifndef HardwareRT
+        int Reps = 0;
+        uint2 stack[16];
+        int stack_size = 0;
+        uint2 current_group;
+        uint oct_inv4;
+        int tlas_stack_size = -1;
+        SmallerRay ray2;
+        int NodeOffset = 0;
+        int TriOffset = 0;
+        int MatOffset = 0;
+        int mesh_id = -1;
+    #endif
+
+        [branch]if(CurBounce % 2 == 1) ray_index += screen_width * screen_height;
+        RayData GlobalRay = GlobalRays[ray_index];
+        bestHit = CreateRayHit();
+        if(CurBounce == 0) bestHit.t = asfloat(GlobalRay.hits.z);
+        float RandNum = random(43, GlobalRay.PixelIndex).x;
+
+        #ifdef HardwareRT
+            const uint rayFlags = RAY_FLAG_FORCE_OPAQUE  ;
+            UnityRayQuery<rayFlags> q;
+            RayDesc myRay;
+            myRay.Origin = GlobalRays[ray_index].origin;
+            myRay.Direction = GlobalRays[ray_index].direction;
+            ray.origin = myRay.Origin;
+            ray.direction = myRay.Direction;
+            myRay.TMin = 0;
+            myRay.TMax = bestHit.t;
+            // bestHit.t = FarPlane;
+            while(true) {
+               q.TraceRayInline(myAccelerationStructure, rayFlags, 0xff, myRay);
+                while(q.Proceed()){}
+
+                if(q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+                    bestHit.t = q.CommittedRayT();
+                    bestHit.u = q.CommittedTriangleBarycentrics().y;
+                    bestHit.v = q.CommittedTriangleBarycentrics().x;
+                    bestHit.mesh_id = uint(q.CommittedInstanceID() | (q.CommittedGeometryIndex() << 27));
+                    bestHit.triangle_id = q.CommittedPrimitiveIndex();
+                    #if defined(AdvancedAlphaMapped) || defined(IgnoreBackfacing) || defined(FadeMapping) || defined(IgnoreGlassMain)
+                        int2 Indexes = int2(bestHit.mesh_id & 0x7FFFFFF, bestHit.mesh_id >> 27);
+                        int triangleOffset = SubMeshOffsets[MeshOffsets[Indexes.x].x + Indexes.y];
+                        int tri_id = bestHit.triangle_id + triangleOffset;
+                        int mesh_id = MeshOffsets[Indexes.x].y;
+                        int MaterialIndex = (_MeshData[mesh_id].MaterialOffset + AggTris[tri_id].MatDat);
+                    #endif
+                    #ifdef AdvancedAlphaMapped
+                        if(CurBounce == 0 && GetFlag(_Materials[MaterialIndex].Tag, Invisible)) {myRay.TMin = bestHit.t + 0.0001f; bestHit.t = FarPlane; continue;}
+                        if(_Materials[MaterialIndex].MatType == CutoutIndex) {
+                            float2 BaseUv = TOHALF(AggTris[tri_id].tex0) * (1.0f - bestHit.u - bestHit.v) + TOHALF(AggTris[tri_id].texedge1) * bestHit.u + TOHALF(AggTris[tri_id].texedge2) * bestHit.v;
+                            if(_Materials[MaterialIndex].AlphaTex.x > 0)
+                                if(SampleTexture(BaseUv, SampleAlpha, _Materials[MaterialIndex]).x < _Materials[MaterialIndex].AlphaCutoff) {myRay.TMin = bestHit.t + 0.0001f; bestHit.t = FarPlane; continue;}
+                        }
+                    #endif
+                    #ifdef IgnoreGlassMain
+                        if(_Materials[MaterialIndex].specTrans == 1) {myRay.TMin = bestHit.t + 0.0001f; bestHit.t = FarPlane; continue;}
+                    #endif
+                    #ifdef IgnoreBackfacing
+                        TrianglePos tri = triangle_get_positions(tri_id);
+                        if(_Materials[MaterialIndex].specTrans != 1 && dot(normalize(cross(normalize(tri.posedge1), normalize(tri.posedge2))), mul((float3x3)_MeshData[mesh_id].W2L, ray.direction)) <= 0) {myRay.TMin = bestHit.t + 0.0001f; bestHit.t = FarPlane; continue;}
+                    #endif
+                    #ifdef FadeMapping
+                        if(_Materials[MaterialIndex].MatType == FadeIndex) {
+                            float2 BaseUv = TOHALF(AggTris[tri_id].tex0) * (1.0f - bestHit.u - bestHit.v) + TOHALF(AggTris[tri_id].texedge1) * bestHit.u + TOHALF(AggTris[tri_id].texedge2) * bestHit.v;
+                            if(_Materials[MaterialIndex].AlphaTex.x > 0)
+                                if(SampleTexture(BaseUv, SampleAlpha, _Materials[MaterialIndex]).x - _Materials[MaterialIndex].AlphaCutoff <= RandNum) {myRay.TMin = bestHit.t + 0.0001f; bestHit.t = FarPlane; continue;}
+                        }
+                    #endif
+                }
+                break;
+            }
+
+
+            int PixIndex = GlobalRay.PixelIndex;
+            uint2 TempUv = uint2(PixIndex % screen_width, PixIndex / screen_width);
+            int2 Indexes = int2(bestHit.mesh_id & 0x7FFFFFF, bestHit.mesh_id >> 27);
+            [branch]if(CurBounce == 0) {
+                _PrimaryTriangleInfo[TempUv] = uint4(MeshOffsets[Indexes.x].y, bestHit.triangle_id + SubMeshOffsets[MeshOffsets[Indexes.x].x + Indexes.y] - _MeshData[MeshOffsets[Indexes.x].y].TriOffset, asuint(bestHit.u), asuint(bestHit.v));
+            } else if(GetBounceData(GlobalColors[PixIndex].MetRoughIsSpec) == 0 || CurBounce + 1 == GetBounceData(GlobalColors[PixIndex].MetRoughIsSpec)) {
+                _PrimaryTriangleInfo[TempUv] = ((UseReSTIRGI && bestHit.t != FarPlane) ? uint4(MeshOffsets[Indexes.x].y, bestHit.triangle_id + SubMeshOffsets[MeshOffsets[Indexes.x].x + Indexes.y] - _MeshData[MeshOffsets[Indexes.x].y].TriOffset, asuint(bestHit.u), asuint(bestHit.v)) : ((UseASVGF || bestHit.t != FarPlane) ? uint4(asuint(ray.direction), 99993) : uint4(asuint(ray.direction * bestHit.t + ray.origin), 99993)));
+            }
+
+            if(CurBounce == 0 && bestHit.t == asfloat(GlobalRay.hits.z)) bestHit.t = FarPlane;
+            set(ray_index, bestHit);
+        #else
+            ray.origin = GlobalRay.origin;
+            ray.direction = (GlobalRay.direction == 0 ? EPSILON : GlobalRay.direction);
+            ray2 = ray;
+
+            oct_inv4 = ray_get_octant_inv4(ray.direction);
+
+            current_group.x = (uint)0;
+            current_group.y = (uint)0x80000000;
+            [loop]while (Reps < MaxTraversalSamples) {//Traverse Accelleration Structure(Compressed Wide Bounding Volume Hierarchy)          
+                uint2 triangle_group;
+
+                [branch]if (current_group.y > 0x00FFFFFF) {
+                    uint child_index_offset = firstbithigh(current_group.y);
+
+                    uint slot_index = (child_index_offset - 24) ^ (oct_inv4 & 0xff);
+                    uint relative_index = countbits(current_group.y & ~(0xffffffff << slot_index));
+                    uint child_node_index = current_group.x + relative_index;
+                    const BVHNode8Data TempNode = cwbvh_nodes[child_node_index];
+
+                    current_group.y &= ~(1 << child_index_offset);
+
+                    if (current_group.y > 0x00FFFFFF) stack[stack_size++] = current_group;
+
+                    uint hitmask = cwbvh_node_intersect(ray, oct_inv4, bestHit.t, TempNode);
+
+                    current_group.y = (hitmask & 0xff000000) | ((TempNode.nodes[0].w >> 24) & 0xff);
+                    triangle_group.y = (hitmask & 0x00ffffff);
+
+                    current_group.x = (TempNode.nodes[1].x) + NodeOffset;
+                    triangle_group.x = (TempNode.nodes[1].y) + TriOffset;
+
+                    Reps++;
+                } else {
+                    triangle_group = current_group;
+                    current_group = (uint)0;
+                }
+
+                if(triangle_group.y != 0) {
+                    [branch]if(tlas_stack_size == -1) {
+                        uint mesh_offset = firstbithigh(triangle_group.y);
+                        triangle_group.y &= ~(1 << mesh_offset);
+                        mesh_id = TLASBVH8Indices[triangle_group.x + mesh_offset];
+                        NodeOffset = _MeshData[mesh_id].NodeOffset;
+                        TriOffset = _MeshData[mesh_id].TriOffset;
+
+                        if (triangle_group.y != 0) stack[stack_size++] = triangle_group;
+                        if (current_group.y & 0xff000000) stack[stack_size++] = current_group;
+
+                        tlas_stack_size = stack_size;
+
+                        int root_index = (_MeshData[mesh_id].mesh_data_bvh_offsets & 0x7fffffff);
+
+                        MatOffset = _MeshData[mesh_id].MaterialOffset;
+                        ray.direction = (mul((float3x3)_MeshData[mesh_id].W2L, ray.direction));
+                        ray.origin = (mul(_MeshData[mesh_id].W2L, float4(ray.origin, 1))).xyz;
+
+                        oct_inv4 = ray_get_octant_inv4(ray.direction);
+
+                        current_group.x = (uint)root_index;
+                        current_group.y = (uint)0x80000000;
+                    } else {
+                        while (triangle_group.y != 0) {
+                            uint triangle_index = firstbithigh(triangle_group.y);
+                            triangle_group.y &= ~(1 << triangle_index);
+                            IntersectTriangle(mesh_id, triangle_group.x + triangle_index, ray, bestHit, MatOffset, RandNum);//Intersect Mesh Triangles
+                        }
+                    }
+                }
+              
+                if ((current_group.y & 0xff000000) == 0) {
+                    if (stack_size == 0) {//thread has finished traversing
+                        int PixIndex = GlobalRay.PixelIndex;
+                        uint2 TempUv = uint2(PixIndex % screen_width, PixIndex / screen_width);
+                        [branch]if(CurBounce == 0) {
+                            _PrimaryTriangleInfo[TempUv] = uint4(bestHit.mesh_id, bestHit.triangle_id - _MeshData[bestHit.mesh_id].TriOffset, asuint(bestHit.u), asuint(bestHit.v));
+                            #if DebugView == DVBVHView
+                                _DebugTex[TempUv] = float4(Reps / 43.0f, Reps > 80, 0, 1);
+                            #endif
+                        } else if(GetBounceData(GlobalColors[PixIndex].MetRoughIsSpec) == 0 || CurBounce + 1 == GetBounceData(GlobalColors[PixIndex].MetRoughIsSpec)) {
+                            _PrimaryTriangleInfo[TempUv] = ((UseReSTIRGI && bestHit.t != FarPlane) ? uint4(bestHit.mesh_id, bestHit.triangle_id - _MeshData[bestHit.mesh_id].TriOffset, asuint(bestHit.u), asuint(bestHit.v)) : ((UseASVGF || bestHit.t != FarPlane) ? uint4(asuint(ray2.direction), 99993) : uint4(asuint(ray2.direction * bestHit.t + ray2.origin), 99993)));
+                        }
+                        if(CurBounce == 0 && bestHit.t == asfloat(GlobalRay.hits.z)) bestHit.t = FarPlane;
+                        set(ray_index, bestHit);
+                        return;
+                    }
+
+                    if (stack_size == tlas_stack_size) {
+                        NodeOffset = 0;
+                        TriOffset = 0;
+                        tlas_stack_size = -1;
+                        ray = ray2;
+                        oct_inv4 = ray_get_octant_inv4(ray.direction);
+                    }
+                    current_group = stack[--stack_size];
+                }
+            }
+    #endif
+}
+
+
+#ifdef DX11
+[numthreads(64, 1, 1)]
+#else
+[numthreads(32, 1, 1)]
+#endif
+void kernel_trace(uint3 id : SV_DispatchThreadID) {//If I move the function contents into here, unity yells at me, so for now its just gonna continue to live in its function
+    IntersectBVH(id.x);
+}
+
+#pragma kernel kernel_shadow
+
+void IntersectBVHShadow(int ray_index) {
+    if(ray_index >= BufferSizes[CurBounce].shadow_rays) return;
+    SmallerRay ray;
+
+    #ifndef HardwareRT
+        uint2 stack[16];
+        int stack_size = 0;
+        uint2 current_group;
+        int NodeOffset;
+        int TriOffset;
+        int MatOffset;
+        uint oct_inv4;
+        int tlas_stack_size;
+        SmallerRay ray2;
+        int Reps = 0;
+        bool Hit = false;
+    #endif
+
+        int mesh_id = -1;
+
+
+        ShadowRayData ShadowRay = ShadowRaysBuffer[ray_index];
+        float3 throughput = 1;
+        #ifdef HardwareRT
+            const uint rayFlags = RAY_FLAG_CULL_NON_OPAQUE;
+            UnityRayQuery<rayFlags> q;
+            RayDesc myRay;
+            myRay.Origin = ShadowRaysBuffer[ray_index].origin;
+            myRay.Direction = ShadowRaysBuffer[ray_index].direction;
+            ray.origin = myRay.Origin;
+            ray.direction = myRay.Direction;
+            myRay.TMin = 0;
+            myRay.TMax = abs(ShadowRaysBuffer[ray_index].t);
+            while(true) {
+                q.TraceRayInline(myAccelerationStructure, rayFlags, 0xff, myRay);
+                while(q.Proceed()){}
+
+                if(q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+
+                    float u = q.CommittedTriangleBarycentrics().y;
+                    float v = q.CommittedTriangleBarycentrics().x;
+                    int2 Indexes = int2(q.CommittedInstanceID(), q.CommittedGeometryIndex());
+                    int triangle_id = q.CommittedPrimitiveIndex();
+                    #if defined(IgnoreBackfacing) || defined(AdvancedAlphaMapped) || defined(IgnoreGlassShadow) || defined(AdvancedBackground)
+                        int triangleOffset = SubMeshOffsets[MeshOffsets[Indexes.x].x + Indexes.y];
+                        triangle_id += triangleOffset;
+                        mesh_id = MeshOffsets[Indexes.x].y;
+                        int MaterialIndex = (_MeshData[mesh_id].MaterialOffset + AggTris[triangle_id].MatDat);
+                        if(GetFlag(_Materials[MaterialIndex].Tag, IsBackground) || GetFlag(_Materials[MaterialIndex].Tag, ShadowCaster))  {myRay.TMin = q.CommittedRayT() + 0.0001f; continue;} 
+                    #endif
+                    #ifdef AdvancedAlphaMapped
+                        if(_Materials[MaterialIndex].MatType == CutoutIndex) {
+                            float2 BaseUv = TOHALF(AggTris[triangle_id].tex0) * (1.0f - u - v) + TOHALF(AggTris[triangle_id].texedge1) * u + TOHALF(AggTris[triangle_id].texedge2) * v;
+                            if(_Materials[MaterialIndex].AlphaTex.x > 0)
+                                if(SampleTexture(BaseUv, SampleAlpha, _Materials[MaterialIndex]).x < _Materials[MaterialIndex].AlphaCutoff) {myRay.TMin = q.CommittedRayT() + 0.0001f; continue;}
+                        }
+                    #endif
+                    #ifdef IgnoreBackfacing
+                        TrianglePos tri = triangle_get_positions(triangle_id);
+                        if(_Materials[MaterialIndex].specTrans != 1 && dot(normalize(cross(normalize(tri.posedge1), normalize(tri.posedge2))), mul((float3x3)_MeshData[mesh_id].W2L, ray.direction)) <= 0) {myRay.TMin = q.CommittedRayT() + 0.0001f; continue;}
+                    #endif
+                    #ifdef IgnoreGlassShadow
+                        if(_Materials[MaterialIndex].specTrans == 1) {
+                            #ifdef StainedGlassShadows
+                                float2 BaseUv = TOHALF(AggTris[triangle_id].tex0) * (1.0f - u - v) + TOHALF(AggTris[triangle_id].texedge1) * u + TOHALF(AggTris[triangle_id].texedge2) * v;
+                                float3 MatCol = _Materials[MaterialIndex].surfaceColor;
+                                if(_Materials[MaterialIndex].AlbedoTex.x > 0) MatCol *= SampleTexture(BaseUv, SampleAlbedo, _Materials[MaterialIndex]) / 3.0f;
+                                MatCol = lerp(MatCol, _Materials[MaterialIndex].BlendColor, _Materials[MaterialIndex].BlendFactor);
+                                throughput *= sqrt(exp(-CalculateExtinction2(1.0f - MatCol, _Materials[MaterialIndex].scatterDistance == 0.0f ? 1.0f : _Materials[MaterialIndex].scatterDistance)));
+                            #endif
+                            myRay.TMin = q.CommittedRayT() + 0.0001f; 
+                            continue;
+                        }
+                    #endif
+
+                    ShadowRaysBuffer[ray_index].t = 0;
+                } else {
+                    if(!TerrainExists) {
+                        uint PixelIndex = ShadowRay.PixelIndex;
+                        if(CurBounce == 0) NEEPosA[uint2(PixelIndex % screen_width, PixelIndex / screen_width)] = float4(ray.origin + ray.direction * abs(ShadowRay.t),NEEPosA[uint2(PixelIndex % screen_width, PixelIndex / screen_width)].w);
+                        #ifdef RadCache
+                            CacheBuffer[PixelIndex].RunningIlluminance = packRGBE(unpackRGBE(ShadowRay.DiffuseIlluminance) * throughput + unpackRGBE(CacheBuffer[PixelIndex].RunningIlluminance));
+                            AddHitToCachePartial(CacheBuffer[PixelIndex], ray.origin);
+                        #endif
+                        if (ShadowRay.t >= 0) {
+
+                            if (CurBounce == 0) {
+                                #ifdef RadCache
+                                    GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRay.illumination,rcp(2.2f)) * throughput);
+                                #else
+                                    GlobalColors[PixelIndex].Direct += ShadowRay.illumination * throughput;
+                                #endif
+                            } else {
+                                #ifdef RadCache
+                                    if(GetBounceData(CacheBuffer[PixelIndex].pathLength) == 0) GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;
+                                #else
+                                    GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;
+                                #endif
+                            }
+                        } else {
+                            if(CurBounce != 0 && ((!UseReSTIRGI && GetBounceData(GlobalColors[PixelIndex].MetRoughIsSpec) == 0) || !UseASVGF)) GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;// * unpackRGBE(asuint(ShadowRay.DiffuseIlluminance));
+                            else GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRay.illumination,rcp(2.2f)) * throughput);
+                        }
+                    } else {
+                        ShadowRaysBuffer[ray_index].illumination *= throughput;
+                        ShadowRaysBuffer[ray_index].DiffuseIlluminance = packRGBE(unpackRGBE(ShadowRaysBuffer[ray_index].DiffuseIlluminance) * throughput);
+                    }
+                }
+                break;
+            }
+        #else
+            const float max_distance = abs(ShadowRay.t);
+            ray.origin = ShadowRay.origin;
+            ray.direction = (ShadowRay.direction == 0 ? EPSILON : ShadowRay.direction);
+            ray2 = ray;
+            TriOffset = 0;
+            MatOffset = 0;
+            Reps = 0;
+            NodeOffset = 0;
+
+            oct_inv4 = ray_get_octant_inv4(ray.direction);
+
+            current_group.x = (uint)0;
+            current_group.y = (uint)0x80000000;
+            tlas_stack_size = -1;
+            [loop] while (Reps < MaxTraversalSamples) {//Traverse Accelleration Structure(Compressed Wide Bounding Volume Hierarchy)            
+                uint2 triangle_group;
+                [branch]if (current_group.y & 0xff000000) {
+                   uint child_index_offset = firstbithigh(current_group.y);
+
+                    uint slot_index = (child_index_offset - 24) ^ (oct_inv4 & 0xff);
+                    uint relative_index = countbits(current_group.y & ~(0xffffffff << slot_index));
+                    uint child_node_index = current_group.x + relative_index;
+                    const BVHNode8Data TempNode = cwbvh_nodes[child_node_index];
+
+                    current_group.y &= ~(1 << child_index_offset);
+
+                    if (current_group.y & 0xff000000) stack[stack_size++] = current_group;
+
+
+                    uint hitmask = cwbvh_node_intersect(ray, oct_inv4, max_distance, TempNode);
+
+                    current_group.y = (hitmask & 0xff000000) | ((TempNode.nodes[0].w >> 24) & 0xff);
+                    triangle_group.y = (hitmask & 0x00ffffff);
+
+                    current_group.x = (TempNode.nodes[1].x) + NodeOffset;
+                    triangle_group.x = (TempNode.nodes[1].y) + TriOffset;
+
+                    Reps++;
+                } else {
+                    triangle_group = current_group;
+                    current_group = (uint)0;
+                }
+
+
+                if(triangle_group.y != 0) {
+                    [branch]if (tlas_stack_size == -1) {//Transfer from Top Level Accelleration Structure to Bottom Level Accelleration Structure
+                        uint mesh_offset = firstbithigh(triangle_group.y);
+                        triangle_group.y &= ~(1 << mesh_offset);
+
+                        mesh_id = TLASBVH8Indices[triangle_group.x + mesh_offset];
+                        NodeOffset = _MeshData[mesh_id].NodeOffset;
+                        TriOffset = _MeshData[mesh_id].TriOffset;
+
+                        if (triangle_group.y != 0) stack[stack_size++] = triangle_group;
+
+                        if (current_group.y & 0xff000000) stack[stack_size++] = current_group;
+
+                        tlas_stack_size = stack_size;
+
+                        int root_index = (_MeshData[mesh_id].mesh_data_bvh_offsets & 0x7fffffff);
+
+                        MatOffset = _MeshData[mesh_id].MaterialOffset;
+                        ray.direction = (mul((float3x3)_MeshData[mesh_id].W2L, ray.direction)).xyz;
+                        ray.origin = (mul(_MeshData[mesh_id].W2L, float4(ray.origin, 1))).xyz;
+
+                        oct_inv4 = ray_get_octant_inv4(ray.direction);
+
+                        current_group.x = (uint)root_index;
+                        current_group.y = (uint)0x80000000;
+                    } else {
+                        while (triangle_group.y != 0) {    
+                            uint triangle_index = firstbithigh(triangle_group.y);
+                            triangle_group.y &= ~(1 << triangle_index);
+
+                            if (triangle_intersect_shadow(triangle_group.x + triangle_index, ray, max_distance, throughput, MatOffset)) {
+                                ShadowRaysBuffer[ray_index].t = 0;
+                                return;
+                            }
+                        }
+                    }
+                }
+
+
+
+
+                if ((current_group.y & 0xff000000) == 0) {
+                    if (stack_size == 0) {//thread has finished traversing
+                        if(!TerrainExists) {
+                            uint PixelIndex = ShadowRay.PixelIndex;
+                            if(CurBounce == 0) NEEPosA[uint2(PixelIndex % screen_width, PixelIndex / screen_width)] = float4(ray2.origin + ray2.direction * abs(ShadowRaysBuffer[ray_index].t), 0);
+                            #ifdef RadCache
+                                CacheBuffer[PixelIndex].RunningIlluminance = packRGBE(unpackRGBE(ShadowRay.DiffuseIlluminance) * throughput + unpackRGBE(CacheBuffer[PixelIndex].RunningIlluminance));
+                                AddHitToCachePartial(CacheBuffer[PixelIndex], ray2.origin);
+                            #endif
+                            if (ShadowRay.t >= 0) {
+                                if (CurBounce == 0) {
+                                    #ifdef RadCache
+                                        GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRay.illumination,rcp(2.2f)) * throughput);
+                                    #else
+                                        GlobalColors[PixelIndex].Direct += ShadowRay.illumination * throughput;
+                                    #endif
+                                } else {
+                                    #ifdef RadCache
+                                        if(GetBounceData(CacheBuffer[PixelIndex].pathLength) == 0) GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;
+                                    #else
+                                        GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;
+                                    #endif
+                                }
+                            } else {
+                                if(CurBounce != 0 && ((!UseReSTIRGI && GetBounceData(GlobalColors[PixelIndex].MetRoughIsSpec) == 0) || !UseASVGF)) GlobalColors[PixelIndex].Indirect += ShadowRay.illumination * throughput;// * unpackRGBE(asuint(ShadowRay.DiffuseIlluminance));
+                                else GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRay.illumination,rcp(2.2f)) * throughput);
+                            }
+                        } else {
+                            ShadowRaysBuffer[ray_index].illumination *= throughput;
+                            ShadowRaysBuffer[ray_index].DiffuseIlluminance = packRGBE(unpackRGBE(ShadowRaysBuffer[ray_index].DiffuseIlluminance) * throughput);
+                        }
+                        return;
+                    }
+
+                    if (stack_size == tlas_stack_size) {
+                        NodeOffset = 0;
+                        TriOffset = 0;
+                        tlas_stack_size = -1;
+                        ray = ray2;
+                        oct_inv4 = ray_get_octant_inv4(ray.direction);
+                    }
+                    current_group = stack[--stack_size];
+                }
+            }
+        #endif
+}
+
+
+#ifdef DX11
+[numthreads(64, 1, 1)]
+#else
+[numthreads(32, 1, 1)]
+#endif
+void kernel_shadow(uint3 id : SV_DispatchThreadID) {//If I move the function contents into here, unity yells at me, so for now its just gonna continue to live in its function
+    IntersectBVHShadow(id.x);
+}
+
+
+
+#pragma kernel kernel_shadow_heightmap
+
+
+static float g = sin(atan(1.0f / 2.0f));
+
+inline bool rayBoxIntersection(const float3 ray_orig, const float3 ray_dir, const float3 Min, const float3 Max, float tMax, inout float t0) {
+    const float3 tmp_min = (Min - ray_orig) / ray_dir;
+    const float3 tmp_max = (Max - ray_orig) / ray_dir;
+    const float3 tmin = min(tmp_min, tmp_max);
+    const float3 tmax = max(tmp_min, tmp_max);
+    t0 = max(tmin.x, max(tmin.y, max(tmin.z, 0.025f))); // Usually ray_tmin = 0
+    float t1 = min(tmax.x, min(tmax.y, min(tmax.z, tMax)));
+    return (t0 <= t1);
+}
+
+
+
+bool IntersectHeightMapShadow(SmallerRay ray, float MaxDist) {
+    float3 Origin = ray.origin;
+    for (int i = 0; i < TerrainCount; i++) {
+        const TerrainData Terrain = Terrains[i];
+        float t0;
+        if (rayBoxIntersection(Origin, ray.direction, Terrain.PositionOffset, Terrain.PositionOffset + float3(Terrain.TerrainDim.x, Terrain.TerrainDim.x, Terrain.TerrainDim.y), MaxDist, t0)) {
+            ray.origin = Origin + ray.direction * (t0 + 0.001f) - Terrain.PositionOffset;
+            float3 CurrentPos = ray.origin;
+            int step_count = 0;
+            float Dist = 0;
+            while (step_count < 2000 && Dist < MaxDist && all(ray.origin + ray.direction * Dist < float3(Terrain.TerrainDim.x, 1000, Terrain.TerrainDim.y)) && all(CurrentPos > 0)) {
+                CurrentPos = ray.origin + ray.direction * Dist;
+                float3 b = float3(Terrain.TerrainDim.x, 0.01f, Terrain.TerrainDim.y);
+                float3 q = (abs(CurrentPos) - b);
+                q.x /= Terrain.TerrainDim.x;
+                q.z /= Terrain.TerrainDim.y;
+                float2 uv = float2(min(CurrentPos.x / Terrain.TerrainDim.x, 1), min(CurrentPos.z / Terrain.TerrainDim.y, 1)) * (Terrain.HeightMap.xy - Terrain.HeightMap.zw) + Terrain.HeightMap.zw;
+                step_count++;
+                float h = Heightmap.SampleLevel(sampler_trilinear_clamp, uv, 0).x;
+                h *= Terrain.HeightScale * 2.0f;
+                q.y -= h;
+                q.y *= g;
+
+                q = max(0, q);
+                float dist = length(q);
+                if (dist < 0.0001f) {
+                    return true;
+                }
+                Dist += dist;
+
+            }
+        }
+    }
+    return false;
+
+}
+
+void IntersectShadowHeightmap(int ray_index) {
+    if(ray_index >= BufferSizes[CurBounce].shadow_rays) return;
+    int pixel_index = ShadowRaysBuffer[ray_index].PixelIndex;
+    SmallerRay ray = CreateRay(ShadowRaysBuffer[ray_index].origin, ShadowRaysBuffer[ray_index].direction);
+    ray.direction = (ray.direction == 0 ? EPSILON : ray.direction);
+    bool HitHeightmap = TerrainExists;
+    if(ShadowRaysBuffer[ray_index].t != 0) {
+        if (TerrainExists) HitHeightmap = IntersectHeightMapShadow(ray, abs(ShadowRaysBuffer[ray_index].t));                  
+        if(!HitHeightmap) {
+            uint PixelIndex = ShadowRaysBuffer[ray_index].PixelIndex;
+            if(CurBounce == 0) NEEPosA[uint2(PixelIndex % screen_width, PixelIndex / screen_width)] = float4(ray.origin + ray.direction * abs(ShadowRaysBuffer[ray_index].t), 0);
+            #ifdef RadCache
+                CacheBuffer[PixelIndex].RunningIlluminance = packRGBE(unpackRGBE(ShadowRaysBuffer[ray_index].DiffuseIlluminance) + unpackRGBE(CacheBuffer[PixelIndex].RunningIlluminance));
+            #endif
+            if (ShadowRaysBuffer[ray_index].t >= 0) {
+                if (CurBounce == 0) {
+                    #ifdef RadCache
+                        GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRaysBuffer[ray_index].illumination,rcp(2.2f)));
+                    #else
+                        GlobalColors[PixelIndex].Direct += ShadowRaysBuffer[ray_index].illumination;
+                    #endif
+                } else {
+                    #ifdef RadCache
+                        if(GetBounceData(CacheBuffer[PixelIndex].pathLength) == 0) GlobalColors[PixelIndex].Indirect += ShadowRaysBuffer[ray_index].illumination;
+                    #else
+                        GlobalColors[PixelIndex].Indirect += ShadowRaysBuffer[ray_index].illumination;
+                    #endif
+                }
+            } else {
+                if(CurBounce != 0 && ((!UseReSTIRGI && GetBounceData(GlobalColors[PixelIndex].MetRoughIsSpec) == 0) || !UseASVGF)) GlobalColors[PixelIndex].Indirect += ShadowRaysBuffer[ray_index].illumination;// * unpackRGBE(asuint(ShadowRay.DiffuseIlluminance));
+                else GlobalColors[PixelIndex].PrimaryNEERay = packRGBE(pow(unpackRGBE(GlobalColors[PixelIndex].PrimaryNEERay),2.2f) + pow(ShadowRaysBuffer[ray_index].illumination,rcp(2.2f)));
+            }
+        }
+    }
+}
+
+
+#ifdef DX11
+[numthreads(64, 1, 1)]
+#else
+[numthreads(32, 1, 1)]
+#endif
+void kernel_shadow_heightmap(uint3 id : SV_DispatchThreadID) {//If I move the function contents into here, unity yells at me, so for now its just gonna continue to live in its function
+    IntersectShadowHeightmap(id.x);
+}
+#pragma kernel kernel_heightmap
+
+bool GetDist(float3 CurrentPos, out float2 uv, out float dist, const TerrainData Terrain) {
+    float3 b = float3(Terrain.TerrainDim.x, 0.01f, Terrain.TerrainDim.y);
+    float3 q = (abs(CurrentPos) - b);
+    q.x /= Terrain.TerrainDim.x;
+    q.z /= Terrain.TerrainDim.y;
+    uv = float2(min(CurrentPos.x / Terrain.TerrainDim.x, 1), min(CurrentPos.z / Terrain.TerrainDim.y, 1));
+    float h = Heightmap.SampleLevel(sampler_trilinear_clamp, uv * (Terrain.HeightMap.xy - Terrain.HeightMap.zw) + Terrain.HeightMap.zw, 0).x;
+    h *= Terrain.HeightScale * 2.0f;
+    q.y -= h;
+    q.y *= g;
+    float b2 = q.y;
+    q = max(0, q);
+    dist = length(q);
+    return b2 != abs(b2);
+}
+
+float4 computeRayPatchIntersectionLinear(float3 r0, float3 rD, float4 _value, float4 Pd, float nextIntersection, float2 sizeBig, TerrainData Terrain, int2 id, inout int iterationCounter)
+{
+    // here we store the result
+    float4 result = 0;
+
+    // linear search steps
+    const int LINEAR_STEPS = 5;
+    float ds = nextIntersection / (float)LINEAR_STEPS;
+
+            // _DebugTex[id.xy] = nextIntersection * 1200.0f;//abs(r0.y);// / 120.0f;
+    // perform linear search of the intersection point
+    for (int i=0; i < LINEAR_STEPS; i++)
+    {
+        // move ray 
+        r0 = r0 + ds * rD;
+
+        // get height on the current position
+        //float4 Texel = texture2DLod(heightmapTex, r0.xz, 0).xyzw * maxHeight;
+        //float Zmin = max(max(Texel.x, Texel.y), max(Texel.z, Texel.w));
+        float Zmin = Heightmap.SampleLevel(my_linear_clamp_sampler, r0.xz, 0.0) / 1024.0f* Terrain.HeightScale * 2.0f;// * Terrain.HeightScale / Terrain.HeightScale * 2.0f;// * 2.0f;
+        //float Zmin = max(max(Texel.x, Texel.y), max(Texel.z, Texel.w));
+
+        // check if we found intersection point 
+        if (Zmin >= r0.y)
+        {
+            result.w = 1;
+            result.xyz = r0;
+            break;
+        }         
+        // iterationCounter ++;
+    }
+
+    // size of the search window
+    float size = ds;
+    float step = 1.0;
+
+    // now do a binary search to find the correct intersection point
+    for (int i=0; i < 3; i++)
+    {
+        size *= 0.5;
+
+        // get current texel value 
+        //float4 Texel = texture2DLod(heightmapTex, r0.xz, 0).xyzw * maxHeight;
+        //float Zmin = max(max(Texel.x, Texel.y), max(Texel.z, Texel.w));
+        float Zmin = Heightmap.SampleLevel(my_linear_clamp_sampler, r0.xz, 0.0) / 1024.0f* Terrain.HeightScale * 2.0f;// * Terrain.HeightScale/ Terrain.HeightScale * 2.0f;// * 2.0f;
+
+        // check if we allowed to move to the boundary
+        if (r0.y < Zmin){
+            step = -1.0;
+        }else{
+            step = 1.0;
+        }
+
+        // move the ray on the current depth
+        r0 = r0 + step * size * rD;
+
+        // iterationCounter ++;
+    }
+    result.xyz = r0;
+    return result;
+}
+
+float4 propagateRay(float3 _r0, float3 rS, float3 rD, float3 eyePosLocal, float3 _min, float3 _max, TerrainData Terrain, int2 id, float MaxT)
+{
+    // we start from this level 
+    int stepCounter = 0;
+    float4 r0 = float4(_r0, 0);
+
+    // compute starting level
+    float2 texSizeBig = 1024;//Terrain.TerrainDim.xy;//textureSize2D(heightmapTex, 0);
+    int level = log2(texSizeBig.x);
+
+    // texture and inverse texture size
+    float2 texSize = float2(1,1);
+    // rS.y /= texSizeBig;
+    // here we store ray coordinates in texture size domain
+    // r0.xz /= texSizeBig;
+    float2 rC = r0.xz * texSize;
+    float srDy = sign(rD.y);
+    int iterationCounter = 0;
+    // repeat
+    float lodBaseDistance = 10.0f;
+    int lodLevel = 0;
+    float TotDist = 0;
+    const float ValModifier = 1.0f / 1024.0f * Terrain.HeightScale * 2.0f;
+    while(stepCounter++ < 2222 && (TotDist * 1024.0f) < MaxT)
+    {
+        // check if pos is on horizontal and/or vertical plane
+        //float2 hv = frac(rC) < 0.000001;
+        float2 hv = floor(1 - frac(rC));
+    
+        // compue sampling coordinates based on this information
+        int2 st = (floor(rC)  + floor(min(rD.xz, float2(0,0))) * hv);
+        // _DebugTex[id.xy] = float4((((float2)st) / float2(texSize)) / 23.0f, 0, 1);
+        // sample the sampler and return the value 
+        float Texel = Heightmap.SampleLevel(my_linear_clamp_sampler, ((float2)st) / float2(texSize), max(level, 0)) * ValModifier;// * 2.0f;// * 2.0f;
+        // _DebugTex[id.xy] = TotDist * 1024.0f / 12.0f;
+        // set size of the heightmap below the ray
+        float Zmin = Texel.x;//max(max(Texel.x, Texel.y), max(Texel.z, Texel.w));
+
+        // compute distancies of mipmap boundaries
+        float4 Pd;
+        Pd.xy = float2(st + 0) / float2(texSize.xy);
+        Pd.zw = float2(st + 1) / float2(texSize.xy);
+
+        // we store here the nearest intersection
+        float intersection;
+        float nextIntersection;
+
+        // decide on the direction of the ray which intersection to compute
+        if (rD.x < 0)
+        {
+            if (rD.z < 0)
+            {
+                // there are two possible intersection (left and top)
+                float2 t = (Pd.xy - r0.xz) / rD.xz;
+                intersection = t.x;
+                intersection = min(intersection, t.y);
+            }else
+            {
+                // there are two possible intersection (left and bottom)
+                float2 t = (Pd.xw - r0.xz) / rD.xz;
+                intersection = t.x;
+                intersection = min(intersection, t.y);
+            }
+        }else
+        {
+            if (rD.z < 0)
+            {
+                // there are two possible intersection (right and top)
+                float2 t = (Pd.zy - r0.xz) / rD.xz;
+                intersection = t.x;
+                intersection = min(intersection, t.y);
+            }else
+            {
+                // there are two possible intersection (right and bottom)
+                float2 t = (Pd.zw - r0.xz) / rD.xz;
+                intersection = t.x;
+                intersection = min(intersection, t.y);
+            }
+        }
+
+        // compute intersection with the Z-plane
+        nextIntersection = intersection;
+        intersection = min(srDy * (r0.y - Zmin) / rD.y, intersection);
+
+        
+        // based on the distance of the ray to the eye, we compute the lod level 
+        // if (dot(r0.xyz - eyePosLocal, r0.xyz - eyePosLocal) > pow(lodBaseDistance, 2))
+        // if (distance(r0.xyz, eyePosLocal) > lodBaseDistance)
+        // {
+        //     // lodLevel ++;
+        //     // lodBaseDistance *= 2.0; 
+        // }
+
+        // stop iteration only if ray falls below of the z map
+        if (level == lodLevel && r0.y <= Zmin )
+        {
+            // do only compute the intersection, if lod level is 0
+            // if (lodLevel >= 0){r0.w = 1; break; }
+            // else 
+            // {
+            
+                // now compute the interpolated bilinar patch corners
+        // return r0;
+                float4 pos = computeRayPatchIntersectionLinear(r0, rD, Texel, Pd, nextIntersection, texSizeBig, Terrain, id, iterationCounter);
+                // if intersection was successfull, then move the ray there and stop 
+                if (pos.w > 0)
+                {
+                    r0 = pos;
+                    break;
+                }else{
+                    // move the ray on the next best position and continue the propagation
+                    intersection = nextIntersection;
+                }
+            // }
+        }
+
+        // we only move the ray if it intersects with the mipmaps boundaries or in level 0
+        if ((r0.y > Zmin ) || level == lodLevel)
+        {           
+            // move ray to the nearest intersection point
+            r0.xyz = r0.xyz + intersection * rD;
+            TotDist += intersection;
+
+            // compute new coordinates
+            float2 _r = r0.xz * float2(texSize);
+        
+            // check if divided by two we get a rest
+            _r = _r * 0.5;
+            _r = floor(1 - frac(_r));
+            float inc = max(_r.x, _r.y);
+            level += inc;
+
+        }else{
+
+            // go deeper in the mipmap
+            level = max(level - 1, lodLevel);            
+        }
+
+        // else decrement level
+        level = max(level, lodLevel);
+
+        // get current texture size
+        texSize = (1024 >> (level));//textureSize2D(heightmapTex, max(level, 0));
+        rC = r0.xz * texSize;
+        // iteration counter
+        // iterationCounter ++;
+        // check if we are moving outside
+        if (any(rC.xy >= texSize)) break;
+        if (any(r0.xyz <= 0.0)) break;    
+        // _DebugTex[id.xy] = stepCounter / 120.0f;
+    }
+    return r0;//
+}
+
+
+void IntersectHeightMap2(int ray_index) {
+    if(ray_index >= BufferSizes[CurBounce].tracerays) return;
+    if(CurBounce % 2 == 1) ray_index += screen_width * screen_height;
+    SmallerRay ray;
+    SmallerRay ray2;
+
+    RayHit bestHit;
+
+    bool DidHit = false;
+    float3 CurrentPos;
+    int step_count = 0;
+    ray.origin = GlobalRays[ray_index].origin;
+    CurrentPos = ray.origin;
+    ray.direction = GlobalRays[ray_index].direction;
+    ray.direction = (ray.direction == 0 ? EPSILON : ray.direction);
+    ray2 = ray;
+    bestHit = get(ray_index);
+    float dist = FarPlane;
+    float2 uv;
+
+
+    for (int i = 0; i < TerrainCount; i++) {
+        float t0;
+        float CurDist = 0;
+        const TerrainData Terrain = Terrains[i];
+        if (rayBoxIntersection(ray2.origin, ray.direction, Terrain.PositionOffset + 0.001f, Terrain.PositionOffset + float3(Terrain.TerrainDim.x, Terrain.TerrainDim.x, Terrain.TerrainDim.y) - 0.001f, bestHit.t, t0)) {
+            int CurLevel = 9;
+            CurDist = 0;
+            dist = FarPlane;
+            ray.origin = ray2.origin + ray.direction * max(t0 + 0.0001f, 0) - Terrain.PositionOffset;
+            CurrentPos = ray.origin;
+            float PrevDist = 0;
+            step_count = 0;
+
+                    int PixIndex = GlobalRays[ray_index].PixelIndex;
+                    uint2 TempUv = uint2(PixIndex % screen_width, PixIndex / screen_width);
+
+            // while (step_count < 2000 && CurDist < bestHit.t && all(ray.origin + ray.direction * CurDist < float3(Terrain.TerrainDim.x, 1000, Terrain.TerrainDim.y)) && all(ray.origin + ray.direction * CurDist > float3(0, 0, 0))) {
+                CurrentPos = ray.origin + ray.direction * CurDist;
+                step_count++;
+                
+                // if(rayBoxIntersection(ray2.origin, ray.direction, Terrain.PositionOffset + 0.001f, Terrain.PositionOffset + float3(Terrain.TerrainDim.x, Terrain.TerrainDim.x, Terrain.TerrainDim.y) - 0.001f, bestHit.t, t0)) {
+                    // Heightmap
+                    // float3 temp2 = ray2.origin;
+                    // temp2.xyz /= 1024.0f;
+                    // temp2.y /= Terrain.HeightScale;
+                float4 CurrentPos2 = propagateRay((CurrentPos) / 1024.0f, (ray2.origin) / 1024.0f, ray.direction, ray2.origin / 1024.0f, 0, 1, Terrain, TempUv, bestHit.t);
+                    CurrentPos = CurrentPos2.xyz * 1024.0f;
+                    // CurrentPos -= float3(512, 0, 512);
+                    // CurrentPos.y *= Terrain.HeightScale;
+                bool throwa = GetDist(CurrentPos, uv, dist, Terrain);
+                    // if(CurrentPos2.w)_DebugTex[TempUv] = length((float3)CurrentPos - ray.origin) / 12.0f;
+                if (CurrentPos2.w) {
+                    // _DebugTex[TempUv] = 1;//(float)stepCounter / 120.0f;
+
+                    // if (throwa) {
+                    //     CurDist -= PrevDist /= 2;
+                    //     for (int i = 0; i < 10; i++) {
+                    //         if (GetDist(ray.origin + ray.direction * CurDist, uv, dist, Terrain)) {
+                    //             CurDist -= PrevDist /= 2;
+                    //         }
+                    //         else {
+                    //             for (int i2 = 0; i2 < 10; i2++) {
+                    //                 if (!GetDist(ray.origin + ray.direction * CurDist, uv, dist, Terrain)) {
+                    //                     CurDist += PrevDist /= 2;
+                    //                 }
+                    //                 else {
+                    //                     CurDist -= PrevDist;
+                    //                     break;
+                    //                 }
+                    //             }
+                    //             break;
+                    //         }
+                    //     }
+                    // }
+
+
+                    bestHit.u = uv.x;
+                    bestHit.v = uv.y;
+                    bestHit.t = length(CurrentPos - ray2.origin);// + t0;
+                    bestHit.triangle_id = i;
+                    bestHit.mesh_id = 9999999;
+                    [branch]if(CurBounce == 0) {
+                        _PrimaryTriangleInfo[TempUv] = uint4(asuint(ray2.direction * bestHit.t + ray2.origin), 1);
+                    } else if(CurBounce == 1) {
+                        _PrimaryTriangleInfo[TempUv] = uint4(((!UseReSTIRGI) ? asuint(ray2.direction) : asuint(ray2.direction * bestHit.t + ray2.origin)), 1);
+                    }
+                    set(ray_index, bestHit);
+                    break;
+                }
+                PrevDist = dist;
+                CurDist += dist;
+
+            // }
+        }
+    }
+
+}
+
+void IntersectHeightMap(int ray_index) {
+    if(ray_index >= BufferSizes[CurBounce].tracerays) return;
+    if(CurBounce % 2 == 1) ray_index += screen_width * screen_height;
+    SmallerRay ray;
+    SmallerRay ray2;
+
+    RayHit bestHit;
+
+    bool DidHit = false;
+    float3 CurrentPos;
+    int step_count = 0;
+    ray.origin = GlobalRays[ray_index].origin;
+    CurrentPos = ray.origin;
+    ray.direction = GlobalRays[ray_index].direction;
+    ray.direction = (ray.direction == 0 ? EPSILON : ray.direction);
+    ray2 = ray;
+    bestHit = get(ray_index);
+    float dist = FarPlane;
+    float2 uv;
+    for (int i = 0; i < TerrainCount; i++) {
+        float t0;
+        float CurDist = 0;
+        const TerrainData Terrain = Terrains[i];
+        if (rayBoxIntersection(ray2.origin, ray.direction, Terrain.PositionOffset + 0.001f, Terrain.PositionOffset + float3(Terrain.TerrainDim.x, Terrain.TerrainDim.x, Terrain.TerrainDim.y) - 0.001f, bestHit.t, t0)) {
+            CurDist = 0;
+            dist = FarPlane;
+            ray.origin = ray2.origin + ray.direction * max(t0 + 0.0001f, 0) - Terrain.PositionOffset;
+            CurrentPos = ray.origin;
+            float PrevDist = 0;
+            step_count = 0;
+                CurrentPos = ray.origin + ray.direction * CurDist;
+            while (step_count++ < 2000 && CurDist < bestHit.t && all(CurrentPos < float3(Terrain.TerrainDim.x, 1000.0f, Terrain.TerrainDim.y)) && all(CurrentPos > 0)) {
+                bool throwa = GetDist(CurrentPos, uv, dist, Terrain);
+                if (dist < 0.0001f) {
+                    if (throwa) {
+
+
+                        float size = PrevDist / 2.0f;
+                        float step = -1.0;
+                        [unroll]for (int i=0; i < 12; i++) {
+                            CurDist += step * size;
+                            size *= 0.5;
+                            if (GetDist(ray.origin + ray.direction * CurDist, uv, dist, Terrain)) step = -1.0;
+                            else step = 1.0;
+                        }
+
+                        // CurDist -= PrevDist /= 2;
+                        // for (int i = 0; i < 10; i++) {
+                        //     if (GetDist(ray.origin + ray.direction * CurDist, uv, dist, Terrain)) {
+                        //         CurDist -= PrevDist /= 2;
+                        //     }
+                        //     else {
+                        //         for (int i2 = 0; i2 < 10; i2++) {
+                        //             if (!GetDist(ray.origin + ray.direction * CurDist, uv, dist, Terrain)) {
+                        //                 CurDist += PrevDist /= 2;
+                        //             }
+                        //             else {
+                        //                 CurDist -= PrevDist;
+                        //                 break;
+                        //             }
+                        //         }
+                        //         break;
+                        //     }
+                        // }
+                    }
+
+                    int PixIndex = GlobalRays[ray_index].PixelIndex;
+                    uint2 TempUv = uint2(PixIndex % screen_width, PixIndex / screen_width);
+
+                    bestHit.u = uv.x;
+                    bestHit.v = uv.y;
+                    bestHit.t = CurDist + t0;
+                    bestHit.triangle_id = i;
+                    bestHit.mesh_id = 9999999;
+                    [branch]if(CurBounce == 0) {
+                        _PrimaryTriangleInfo[TempUv] = uint4(asuint(ray2.direction * bestHit.t + ray2.origin), 1);
+                    } else if(CurBounce == 1) {
+                        _PrimaryTriangleInfo[TempUv] = uint4(((!UseReSTIRGI) ? asuint(ray2.direction) : asuint(ray2.direction * bestHit.t + ray2.origin)), 1);
+                    }
+                    set(ray_index, bestHit);
+                    break;
+                }
+                PrevDist = dist;
+                CurDist += dist / 2.0f;
+                CurrentPos = ray.origin + ray.direction * CurDist;
+            }
+        }
+    }
+
+}
+
+
+#ifdef DX11
+[numthreads(64, 1, 1)]
+#else
+[numthreads(32, 1, 1)]
+#endif
+void kernel_heightmap(uint3 id : SV_DispatchThreadID) {//If I move the function contents into here, unity yells at me, so for now its just gonna continue to live in its function
+
+    IntersectHeightMap(id.x);
+}
+
+
+
+
+

@@ -1,0 +1,56 @@
+Hello and thank you for trying out my path tracer!
+
+To get started:
+1. After importing the unity package, for a new scene you want to open the PathTracer tab on the top bar, and click "Arrange Hierarchy"
+2. After doing this, your scene should now be in the format required by the path tracer
+3. Now you can click "Build Aggregated BVH" to build the acceleration structure for all objects, and just wait for the "All Objects Built" to turn green before entering play mode
+4. After that is done, you can just enter play mode and play as normal
+
+
+Adding new objects
+	Automatic methods
+  		First, add your gameobjects as a child of the "Scene" gameobject created by TrueTrace.
+  			Global setup: Press "Auto Assign Scripts" in the TrueTrace settings menu.
+  			Local setup: Go to "Hierarchy Options" in the TrueTrace settings menu. 
+  			Drag the root gameobject that you added to the "Selective Auto Assign Scripts" section.
+  			Click "Selective Auto Assign".
+
+	Manual method
+		First, add your gameobjects as a child of the "Scene" gameobject created by TrueTrace.
+  		Each gameobject that contains a mesh needs the script "RayTracingObject" added to it.
+  		For non-skinned meshes: 
+    		Add the script "ParentObject" to either:
+      			Each gameobject that has a "RayTracingObject" script
+      			OR
+      			The Direct Parent gameobject of gameobjects that have a "RayTracingObject" script(Groups their meshes together, increasing performance)
+  		For Skinned Meshes:
+			Any parent gameobject of the RayTracingObjects(will group together all Skinned Children)
+	For default unity lights, you just add the "RayTracingLight" script to each one
+
+General Use/Notes
+	DX12 is recommended, as it enables use of OIDN, Bindless texturing, RT Cores, and slightly higher performance
+	The camera you want to render from, you attach the RenderHandler script to(if you have a camera tagged MainCamera, this will be done automatically)
+
+
+Changeable Defines:
+To access the in script settings, go to the "GlobalDefines.cginc" under the TrueTrace/Resources folder
+This will allow you to toggle some low level settings:
+	1. AdvancedAlphaMapping - Enables or Disables the support of cutout objects(performance penalty)
+	2. ExtraSampleValidation - Shoots an additional ray(2 instead of 1) in ReSTIR GI ray validation for sharper shadows
+	3. IgnoreGlassShadow - Shadow Rays can pass through glass
+	4. IgnoreGlassMain - Main Rays can pass through glass
+	5. FadeMapping - Enables experimental Fade material type
+	6. HardwareRT - Turn on if your in Unity 2023 or higher and want to use Hardware RT cores
+	7. PointFiltering - Switch between point and linear filtering for albedo textures
+	8. StainedGlassShadows - Shadow rays passing through glass will be tinted to the glass color
+	9. IgnoreBackFacing - Culls backfacing triangles
+	10. WhiteLights - Forces all lights to be white
+	11. LBVH - Enable/Disable the light BVH
+	12. FasterLightSampling - Uses an alternative method for calculating LBVH PDF that is a bit wrong, but much faster
+	13. AccurateEmissionTex - Turn on/off emission textures
+	14. RadianceCache - Turn on/off the Radiance Cache
+	15. IndirectRetraceWeighting - Adds indirect lighting into ReSTIR GI retracing/luminance validation
+	16. TrueBlack - Allows materials to be truely black, removes the bottom limit
+	17. AdvancedRadCacheAlt - Experimental working set for the Radiance Cache, not recomended
+	18. UseTextureLOD - (Only works with Bindless)Enables Texture LOD
+	19. DebugView - Replace that "DVNone" with any of the defines below, from "DVNone" to "DVGIView"
