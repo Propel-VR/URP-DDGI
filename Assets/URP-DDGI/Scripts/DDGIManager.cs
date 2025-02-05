@@ -12,8 +12,7 @@ using UnityEditor;
 
 namespace DDGIURP 
 {
-
-    [ExecuteInEditMode, RequireComponent(typeof(DDGIDebugProbeRenderer))]
+    [ExecuteInEditMode, RequireComponent(typeof(DDGIDebugProbeRenderer), typeof(BVHScene))]
     public class DDGIManager : MonoBehaviour
     {
         [Header("Probe Settings")]
@@ -24,9 +23,6 @@ namespace DDGIURP
         [Header("Rendering Settings")]
         [SerializeField, Range(4, 48)] int irradianceResolution = 6;
         [SerializeField, Range(4, 48)] int visibilityResolution = 12;
-
-        [Header("References")]
-        [SerializeField] ComputeShader DDGI;
 
         [Header("Debug Settings")]
         [SerializeField] int maxMemoryUsageMB = 1000;
@@ -39,7 +35,9 @@ namespace DDGIURP
         [ReadOnly, SerializeField] RenderTexture visibilityTex;
         [ReadOnly, SerializeField] RenderTexture tracedTargetTex;
 
+        ComputeShader DDGI;
         DDGIDebugProbeRenderer debugProbeRenderer;
+        BVHScene scene;
         int irrResPad;
         int visResPad;
 
@@ -57,6 +55,8 @@ namespace DDGIURP
         {
             inst = this;
             RefreshProbes();
+
+            DDGI = Resources.Load<ComputeShader>("Shaders/DDGI");
         }
 
         private void OnValidate() => RefreshProbes();
@@ -65,6 +65,8 @@ namespace DDGIURP
 
         private void RefreshProbes ()
         {
+            scene = GetComponent<BVHScene>();
+
             debugProbeRenderer = GetComponent<DDGIDebugProbeRenderer>();
             debugProbeRenderer.enabled = enabledProbeDebuggingView;
 

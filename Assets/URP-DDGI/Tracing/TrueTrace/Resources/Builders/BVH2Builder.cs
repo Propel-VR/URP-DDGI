@@ -206,8 +206,6 @@ namespace TrueTrace {
             NativeArray<int>.Copy(DimensionedIndicesArray, 0, FinalIndices, 0, PrimCount);
             DimensionedIndicesArray.Dispose();
             PrimAABBs.Dispose();
-
         }
-
     }
 }

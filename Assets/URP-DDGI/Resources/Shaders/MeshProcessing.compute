@@ -1,0 +1,99 @@
+#pragma multi_compile __ HAS_32_BIT_INDICES
+#pragma multi_compile __ HAS_NORMALS
+#pragma multi_compile __ HAS_UVS
+#pragma kernel ProcessMesh
+
+#include "RaytracingIncludes.hlsl"
+
+ByteAddressBuffer VertexBuffer;
+ByteAddressBuffer IndexBuffer;
+
+uint VertexStride;
+uint PositionOffset;
+uint NormalOffset;
+uint UVOffset;
+
+uint TriangleCount;
+uint OutputTriangleStart;
+
+RWStructuredBuffer<float3> VertexPositionBuffer;
+
+float3 ReadVertexPosition(uint vertexIndex)
+{
+    uint readIndex = (vertexIndex * VertexStride) + PositionOffset;
+    uint3 posData = VertexBuffer.Load3(readIndex);
+    return asfloat(posData);
+}
+
+float3 ReadVertexNormal(uint vertexIndex)
+{
+    uint readIndex = (vertexIndex * VertexStride) + NormalOffset;
+    uint3 normalData = VertexBuffer.Load3(readIndex);
+    return asfloat(normalData);
+}
+
+float2 ReadVertexUV(uint vertexIndex)
+{
+    uint readIndex = (vertexIndex * VertexStride) + UVOffset;
+    uint2 uvData = VertexBuffer.Load2(readIndex);
+    return asfloat(uvData);
+}
+
+[numthreads(64, 1, 1)]
+void ProcessMesh(uint3 id : SV_DispatchThreadID)
+{
+    uint triIndex = id.x;
+    if (triIndex >= TriangleCount)
+    {
+        return;
+    }
+    
+    uint3 vertIndices;
+    
+#if HAS_32_BIT_INDICES
+        uint triStride = 3 * 4; // 32-bit index buffer
+        uint byteOffset = triIndex * triStride;
+        vertIndices = IndexBuffer.Load3(byteOffset);
+#else
+    uint triStride = 3 * 2; // 16-bit index buffer
+    uint byteOffset = triIndex * triStride;
+    uint alignedOffset = byteOffset & ~3;
+    uint2 packedWords = IndexBuffer.Load2(alignedOffset);
+    uint offsetInWord = byteOffset % 4;
+    
+    vertIndices.x = (offsetInWord == 0) ? (packedWords.x & 0xFFFF) : (packedWords.x >> 16);
+    vertIndices.y = (offsetInWord == 0) ? (packedWords.x >> 16) : (packedWords.y & 0xFFFF);
+    vertIndices.z = (offsetInWord == 0) ? (packedWords.y & 0xFFFF) : (packedWords.y >> 16);
+#endif
+    
+    float3 vert0 = ReadVertexPosition(vertIndices.x);
+    float3 vert1 = ReadVertexPosition(vertIndices.y);
+    float3 vert2 = ReadVertexPosition(vertIndices.z);
+    
+    // Write vertex positions into buffer
+    int writeTriIndex = OutputTriangleStart + triIndex;
+    VertexPositionBuffer[(writeTriIndex * 3) + 0] = float4(vert0.xyz, 0);
+    VertexPositionBuffer[(writeTriIndex * 3) + 1] = float4(vert1.xyz, 0);
+    VertexPositionBuffer[(writeTriIndex * 3) + 2] = float4(vert2.xyz, 0);
+    
+    TriangleAttributes attr = (TriangleAttributes) 0;
+
+#if HAS_NORMALS
+        attr.normal0 = ReadVertexNormal(vertIndices.x);
+        attr.normal1 = ReadVertexNormal(vertIndices.y);
+        attr.normal2 = ReadVertexNormal(vertIndices.z);
+    
+        // Transform normals to world space
+        attr.normal0 = mul(LocalToWorld, float4(attr.normal0.xyz, 0)).xyz;
+        attr.normal1 = mul(LocalToWorld, float4(attr.normal1.xyz, 0)).xyz;
+        attr.normal2 = mul(LocalToWorld, float4(attr.normal2.xyz, 0)).xyz;
+#endif
+
+#if HAS_UVS
+        attr.uv0 = ReadVertexUV(vertIndices.x);
+        attr.uv1 = ReadVertexUV(vertIndices.y);
+        attr.uv2 = ReadVertexUV(vertIndices.z);
+#endif
+    
+    TriangleAttributesBuffer[writeTriIndex] = attr;
+}
