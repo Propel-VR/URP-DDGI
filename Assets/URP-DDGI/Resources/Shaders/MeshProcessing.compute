@@ -29,7 +29,7 @@ float3 ReadVertexNormal(uint vertexIndex)
 {
     uint readIndex = (vertexIndex * VertexStride) + NormalOffset;
     uint3 normalData = VertexBuffer.Load3(readIndex);
-    return asfloat(normalData);
+    return float3(normalData);
 }
 
 float2 ReadVertexUV(uint vertexIndex)
@@ -51,9 +51,9 @@ void ProcessMesh(uint3 id : SV_DispatchThreadID)
     uint3 vertIndices;
     
 #if HAS_32_BIT_INDICES
-        uint triStride = 3 * 4; // 32-bit index buffer
-        uint byteOffset = triIndex * triStride;
-        vertIndices = IndexBuffer.Load3(byteOffset);
+    uint triStride = 3 * 4; // 32-bit index buffer
+    uint byteOffset = triIndex * triStride;
+    vertIndices = IndexBuffer.Load3(byteOffset);
 #else
     uint triStride = 3 * 2; // 16-bit index buffer
     uint byteOffset = triIndex * triStride;
@@ -72,28 +72,23 @@ void ProcessMesh(uint3 id : SV_DispatchThreadID)
     
     // Write vertex positions into buffer
     int writeTriIndex = OutputTriangleStart + triIndex;
-    VertexPositionBuffer[(writeTriIndex * 3) + 0] = float4(vert0.xyz, 0);
-    VertexPositionBuffer[(writeTriIndex * 3) + 1] = float4(vert1.xyz, 0);
-    VertexPositionBuffer[(writeTriIndex * 3) + 2] = float4(vert2.xyz, 0);
+    VertexPositionBuffer[(writeTriIndex * 3) + 0] = vert0.xyz;
+    VertexPositionBuffer[(writeTriIndex * 3) + 1] = vert1.xyz;
+    VertexPositionBuffer[(writeTriIndex * 3) + 2] = vert2.xyz;
     
     TriangleAttributes attr = (TriangleAttributes) 0;
-
-#if HAS_NORMALS
+    
+    #ifdef HAS_NORMALS
         attr.normal0 = ReadVertexNormal(vertIndices.x);
         attr.normal1 = ReadVertexNormal(vertIndices.y);
         attr.normal2 = ReadVertexNormal(vertIndices.z);
-    
-        // Transform normals to world space
-        attr.normal0 = mul(LocalToWorld, float4(attr.normal0.xyz, 0)).xyz;
-        attr.normal1 = mul(LocalToWorld, float4(attr.normal1.xyz, 0)).xyz;
-        attr.normal2 = mul(LocalToWorld, float4(attr.normal2.xyz, 0)).xyz;
-#endif
+    #endif
 
-#if HAS_UVS
+    #ifdef HAS_UVS
         attr.uv0 = ReadVertexUV(vertIndices.x);
         attr.uv1 = ReadVertexUV(vertIndices.y);
         attr.uv2 = ReadVertexUV(vertIndices.z);
-#endif
-    
+    #endif
+
     TriangleAttributesBuffer[writeTriIndex] = attr;
 }

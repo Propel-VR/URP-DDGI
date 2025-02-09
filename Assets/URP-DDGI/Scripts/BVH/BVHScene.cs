@@ -7,7 +7,9 @@ using System.Linq;
 using Unity.Collections;
 using Unity.Mathematics;
 using System;
-using Unity.Collections.LowLevel.Unsafe;
+using System.Diagnostics;
+using Debug = UnityEngine.Debug;
+using Unity.Jobs;
 
 
 namespace DDGIURP
@@ -29,7 +31,7 @@ namespace DDGIURP
         [ReadOnly, SerializeField] int totalUniqueMeshes;
         [ReadOnly, SerializeField] int totalVertexCount;
         [ReadOnly, SerializeField] int totalTriangleCount;
-        [SerializeField, HideInInspector] List<Blas> meshBVHInstances;
+        [SerializeField, HideInInspector] List<BLAS> meshBVHInstances;
 
         const int VERTEX_SIZE = 3 * sizeof(float);
         const int TRIS_ATTRIBUTE_SIZE = 15 * sizeof(float);
@@ -42,34 +44,35 @@ namespace DDGIURP
 
         private ComputeBuffer vertexPositionBuffer;
         private ComputeBuffer triangleAttributeBuffer;
-        private NativeArray<float4> vertexPositionBufferCPU;
+        private NativeArray<float3> vertexPositionBufferCPU;
+        private BVH bvh;
+
+        private HashSet<Mesh> uniqueMeshes;
         private DateTime readbackStartTime;
 
-        private void Awake()
-        {
-            // Load compute shader
-            meshProcessingShader = Resources.Load<ComputeShader>("Shaders/MeshProcessing");
-            has32BitIndicesKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_32_BIT_INDICES");
-            hasNormalsKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_NORMALS");
-            hasUVsKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_UVS");
-        }
-
-        private void OnDestroy()
-        {
-            ClearBLAS();
-        }
+        void OnDisable () => ClearBLAS();
 
         private void ClearBLAS ()
         {
             vertexPositionBuffer?.Release();
             triangleAttributeBuffer?.Release();
-            if (vertexPositionBufferCPU.IsCreated)
-            {
-                vertexPositionBufferCPU.Dispose();
-            }
+            if (vertexPositionBufferCPU.IsCreated) vertexPositionBufferCPU.Dispose();
+            if (bvh.IsCreated) bvh.Dispose();
         }
 
-        
+        private void OnDrawGizmosSelected()
+        {
+            if (!bvh.IsCreated) return;
+
+            Gizmos.color = Color.red;
+            for(int i = 0; i < bvh.NodeCount; i++)
+            {
+                var node = bvh.bvhNode[i];
+                var center = (node.aabbMin + node.aabbMax) * 0.5f;
+                var size = math.abs(node.aabbMax - node.aabbMin);
+                Gizmos.DrawWireCube(center, size);
+            }
+        }
 
 
 
@@ -83,21 +86,27 @@ namespace DDGIURP
             totalTrackedMeshes = filteredRenderers.Count;
         }
 
+#if UNITY_EDITOR
         [Button]
         public void ProcessBLAS ()
         {
-#if UNITY_EDITOR
+            // Load compute shader, clear previous
+            meshProcessingShader = Resources.Load<ComputeShader>("Shaders/MeshProcessing");
+            has32BitIndicesKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_32_BIT_INDICES");
+            hasNormalsKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_NORMALS");
+            hasUVsKeyword = meshProcessingShader.keywordSpace.FindKeyword("HAS_UVS");
+            ClearBLAS();
+
             if(UnityEditor.EditorApplication.isPlaying)
             {
                 Debug.LogError("[DDGI Scene] Leave playmode to build BLAS.");
                 return;
             }
-#endif
             Debug.Log("[DDGI Scene] Building BLAS. Do not enter playmode.");
 
             // Gather all the meshes to build a BLAS out of them
-            meshBVHInstances = new List<Blas>();
-            var uniqueMeshes = new HashSet<Mesh>();
+            meshBVHInstances = new List<BLAS>();
+            uniqueMeshes = new HashSet<Mesh>();
             foreach (var renderer in filteredRenderers)
             {
                 if(renderer.gameObject.TryGetComponent<MeshFilter>(out var meshFilter) && meshFilter.sharedMesh != null)
@@ -111,25 +120,25 @@ namespace DDGIURP
             }
             totalUniqueMeshes = uniqueMeshes.Count;
 
-            ClearBLAS();
-
             // Gather total vertex count
             totalVertexCount = 0;
             totalTriangleCount = 0;
             int meshIndex = 0;
             foreach (var mesh in uniqueMeshes)
             {
-                meshBVHInstances.Add(new Blas(mesh, meshIndex++, totalVertexCount, mesh.vertexCount));
+                meshBVHInstances.Add(new BLAS(mesh, meshIndex++, totalVertexCount, mesh.vertexCount));
                 totalVertexCount += mesh.vertexCount;
+                totalTriangleCount += BVHScene_Utils.GetTriangleCount(mesh);
             }
 
-            vertexPositionBuffer = new ComputeBuffer(totalVertexCount, VERTEX_SIZE);
-            vertexPositionBufferCPU = new NativeArray<float4>(totalVertexCount * VERTEX_SIZE, Allocator.Persistent);
-            triangleAttributeBuffer = new ComputeBuffer(totalVertexCount / 3, TRIS_PACKED_ATTRIBUTE_SIZE);
+            vertexPositionBuffer = new ComputeBuffer(totalTriangleCount * 3, VERTEX_SIZE);
+            vertexPositionBufferCPU = new NativeArray<float3>(totalTriangleCount * 3, Allocator.Persistent);
+            triangleAttributeBuffer = new ComputeBuffer(totalTriangleCount, TRIS_PACKED_ATTRIBUTE_SIZE);
 
             // Downloading mesh to be processed
             Debug.Log("[DDGI Scene] Coping meshes to temporarly buffer");
             int i = 0;
+            totalTriangleCount = 0;
             foreach (var mesh in uniqueMeshes)
             {
                 // Ensure meshes can be downloaded
@@ -165,8 +174,6 @@ namespace DDGIURP
                 totalTriangleCount += triangleCount;
 
                 meshProcessingShader.Dispatch(0, Mathf.CeilToInt(triangleCount / 64.0f), 1, 1);
-
-                Debug.Log($"[DDGI Scene] Copied {i}/{totalUniqueMeshes}");
                 i++;
             }
             Debug.Log("[DDGI Scene] Finished Copy. Starting Readback...");
@@ -182,21 +189,30 @@ namespace DDGIURP
                 Debug.LogError("[DDGI Scene] Failed to readback.");
                 return;
             }
-
             var readbackTime = DateTime.UtcNow - readbackStartTime;
             Debug.Log($"[DDGI Scene] Readback completed in {readbackTime.Milliseconds}ms. Starting BVH generation...");
 
-            // In the editor if we exit play mode before the BVH is finished building the memory will be freed.
-            // This was necessary for unity-TinyBVH but I have not yet tried for the URP-DDGI BVH builder
-#if UNITY_EDITOR
-            var persistentBuffer = new NativeArray<float4>(vertexPositionBufferCPU.Length, Allocator.Persistent);
-            persistentBuffer.CopyFrom(vertexPositionBufferCPU);
-            var dataPointer = (IntPtr)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(persistentBuffer);
-#else
-            var dataPointer = (IntPtr)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(vertexPositionBufferCPU);
-#endif
+            var sw = new Stopwatch();
+            sw.Start();
 
-            Debug.Log("[DDGI Scene] BVH completed.");
+            // Allocate the BLAS BVH and generate them in threads.
+            // Each unique mesh is calculated in a separate thread.
+            var bvhTempArray = new NativeArray<BVH>(totalUniqueMeshes, Allocator.TempJob);
+            for(int i = 0; i < totalUniqueMeshes; i++)
+            {
+                var bvh = new BVH();
+                bvh.Allocate(vertexPositionBufferCPU, Allocator.Domain);
+                bvhTempArray[i] = bvh;
+            }
+            var bvhJob = new BVHJob(bvhTempArray);
+            bvhJob.Schedule(bvhTempArray.Length, 1).Complete();
+
+            bvh = bvhTempArray[0];
+            bvhTempArray.Dispose();
+
+            sw.Stop();
+            Debug.Log($"[DDGI Scene] BVH completed in {sw.Elapsed.TotalMilliseconds}ms.");
         }
     }
+#endif
 }

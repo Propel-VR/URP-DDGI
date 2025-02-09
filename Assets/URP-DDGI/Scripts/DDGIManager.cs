@@ -61,7 +61,7 @@ namespace DDGIURP
 
         private void OnValidate() => RefreshProbes();
 
-        private void OnDestroy() => Cleanup();
+        void OnDisable() => Cleanup();
 
         private void RefreshProbes ()
         {

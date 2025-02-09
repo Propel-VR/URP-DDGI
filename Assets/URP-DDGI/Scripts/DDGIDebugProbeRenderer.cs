@@ -24,6 +24,8 @@ namespace DDGIURP
         // TODO: Make all of these directly accessible
         public void UpdateLayout (DDGIManager manager, int3 probeDimensions, float probeDensity, Vector3 boxCenter, Vector3 boxSize, int irrResPad, int irrRes)
         {
+            if (!enabled) return;
+
             this.boxCenter = boxCenter;
             this.boxSize = boxSize;
 
@@ -76,22 +78,19 @@ namespace DDGIURP
 
         private void OnEnable()
         {
-
 #if UNITY_EDITOR
-            SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
 #endif
         }
 
         private void OnDisable()
         {
-
 #if UNITY_EDITOR
             SceneView.duringSceneGui -= OnSceneGUI;
 #endif
+
             instanceBuffer?.Release();
             cmdBuffer?.Release();
-            cmdBuffer = null;
         }
 
 #if UNITY_EDITOR
