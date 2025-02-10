@@ -31,7 +31,7 @@ namespace DDGIURP
         [ReadOnly, SerializeField] int totalUniqueMeshes;
         [ReadOnly, SerializeField] int totalVertexCount;
         [ReadOnly, SerializeField] int totalTriangleCount;
-        [SerializeField, HideInInspector] List<BLAS> meshBVHInstances;
+        [SerializeField] List<BLAS> BLAS;
 
         const int VERTEX_SIZE = 3 * sizeof(float);
         const int TRIS_ATTRIBUTE_SIZE = 15 * sizeof(float);
@@ -45,7 +45,6 @@ namespace DDGIURP
         private ComputeBuffer vertexPositionBuffer;
         private ComputeBuffer triangleAttributeBuffer;
         private NativeArray<float3> vertexPositionBufferCPU;
-        private BVH bvh;
 
         private HashSet<Mesh> uniqueMeshes;
         private DateTime readbackStartTime;
@@ -57,20 +56,29 @@ namespace DDGIURP
             vertexPositionBuffer?.Release();
             triangleAttributeBuffer?.Release();
             if (vertexPositionBufferCPU.IsCreated) vertexPositionBufferCPU.Dispose();
-            if (bvh.IsCreated) bvh.Dispose();
+            foreach (var blas in BLAS)
+            {
+                if (blas.bvh.IsCreated) blas.bvh.Dispose();
+                blas.bvh = default;
+            }
+            BLAS.Clear();
         }
 
         private void OnDrawGizmosSelected()
         {
-            if (!bvh.IsCreated) return;
-
-            Gizmos.color = Color.red;
-            for(int i = 0; i < bvh.NodeCount; i++)
+            if (BLAS == null) return;
+            foreach (var blas in BLAS)
             {
-                var node = bvh.bvhNode[i];
-                var center = (node.aabbMin + node.aabbMax) * 0.5f;
-                var size = math.abs(node.aabbMax - node.aabbMin);
-                Gizmos.DrawWireCube(center, size);
+                if (!blas.bvh.IsCreated) return;
+
+                Gizmos.color = Color.red;
+                for(int i = 0; i < blas.bvh.NodeCount; i++)
+                {
+                    var node = blas.bvh.bvhNode[i];
+                    var center = (node.aabbMin + node.aabbMax) * 0.5f;
+                    var size = math.abs(node.aabbMax - node.aabbMin);
+                    Gizmos.DrawWireCube(center, size);
+                }
             }
         }
 
@@ -105,7 +113,7 @@ namespace DDGIURP
             Debug.Log("[DDGI Scene] Building BLAS. Do not enter playmode.");
 
             // Gather all the meshes to build a BLAS out of them
-            meshBVHInstances = new List<BLAS>();
+            BLAS = new List<BLAS>();
             uniqueMeshes = new HashSet<Mesh>();
             foreach (var renderer in filteredRenderers)
             {
@@ -126,7 +134,8 @@ namespace DDGIURP
             int meshIndex = 0;
             foreach (var mesh in uniqueMeshes)
             {
-                meshBVHInstances.Add(new BLAS(mesh, meshIndex++, totalVertexCount, mesh.vertexCount));
+                var triangleCount = BVHScene_Utils.GetTriangleCount(mesh);
+                BLAS.Add(new BLAS(mesh, meshIndex++, totalTriangleCount, triangleCount));
                 totalVertexCount += mesh.vertexCount;
                 totalTriangleCount += BVHScene_Utils.GetTriangleCount(mesh);
             }
@@ -197,17 +206,24 @@ namespace DDGIURP
 
             // Allocate the BLAS BVH and generate them in threads.
             // Each unique mesh is calculated in a separate thread.
-            var bvhTempArray = new NativeArray<BVH>(totalUniqueMeshes, Allocator.TempJob);
-            for(int i = 0; i < totalUniqueMeshes; i++)
+            var bvhTempArray = new NativeArray<BVH>(BLAS.Count, Allocator.TempJob);
+            int i = 0;
+            foreach(var blas in BLAS)
             {
                 var bvh = new BVH();
-                bvh.Allocate(vertexPositionBufferCPU, Allocator.Domain);
+                var vertsSlice = vertexPositionBufferCPU.GetSubArray(blas.bufferIndex * 3, blas.bufferCount * 3);
+                bvh.Build(vertsSlice, Allocator.Domain);
                 bvhTempArray[i] = bvh;
+                i++;
             }
             var bvhJob = new BVHJob(bvhTempArray);
             bvhJob.Schedule(bvhTempArray.Length, 1).Complete();
-
-            bvh = bvhTempArray[0];
+            i = 0;
+            foreach (var blas in BLAS)
+            {
+                blas.bvh = bvhTempArray[i];
+                i++;
+            }
             bvhTempArray.Dispose();
 
             sw.Stop();

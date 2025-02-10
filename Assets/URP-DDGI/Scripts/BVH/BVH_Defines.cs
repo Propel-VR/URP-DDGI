@@ -13,14 +13,17 @@ namespace DDGIURP
     [Serializable]
     public class BLAS
     {
-        public Mesh BVH;
-        public int blasIndex;
+        public Mesh sourceMesh;
+        public int index;
         public int bufferIndex;
         public int bufferCount;
 
-        public BLAS(Mesh bVH, int BLASIndex, int bufferIndex, int bufferCount)
+        public BVH bvh;
+
+        public BLAS(Mesh bVH, int index, int bufferIndex, int bufferCount)
         {
-            BVH = bVH;
+            sourceMesh = bVH;
+            this.index = index;
             this.bufferIndex = bufferIndex;
             this.bufferCount = bufferCount;
         }

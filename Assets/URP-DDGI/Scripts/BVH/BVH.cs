@@ -5,7 +5,6 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
-using UnityEngine;
 using UnityEngine.Assertions;
 using static DDGIURP.BVHUtils;
 using static Unity.Mathematics.math;
@@ -22,7 +21,7 @@ namespace DDGIURP
         public float4x4 worldToLocal;
         public float3 aabbMin;
         public float3 aabbMax;
-        uint blasIdx;
+        public uint blasIdx;
     }
 
     /// <summary>
@@ -36,10 +35,10 @@ namespace DDGIURP
         [FieldOffset(12)] public uint leftFirst; // 16 bytes
         [FieldOffset(16)] public float3 aabbMax;
         [FieldOffset(28)] public uint triCount; // 16 bytes, total: 32 bytes
-        public bool IsLeaf => triCount > 0;
-        public float SurfaceArea => SA(aabbMin, aabbMax);
-        public float Intersect(Ray ray) => IntersectAABB(ref ray, aabbMin, aabbMax);
-        public bool Intersect(float3 bmin, float3 bmax) => IntersectAABB(bmin, bmax, aabbMin, aabbMax);
+        public readonly bool IsLeaf => triCount > 0;
+        public readonly float SurfaceArea => SA(aabbMin, aabbMax);
+        public readonly float Intersect(Ray ray) => IntersectAABB(ref ray, aabbMin, aabbMax);
+        public readonly bool Intersect(float3 bmin, float3 bmax) => IntersectAABB(bmin, bmax, aabbMin, aabbMax);
     }
 
     /// <summary>
@@ -54,7 +53,7 @@ namespace DDGIURP
         [FieldOffset(12)] public uint primIdx; // Index of the original primitive
         [FieldOffset(16)] public float3 bmax; // AABB max x, y, z
         [FieldOffset(28)] public uint clipped; // Fragment is the result of clipping if > 0
-        public bool ValidBox => bmin.x < BVH_FAR;
+        public readonly bool ValidBox => bmin.x < BVH_FAR;
     }
 
     /// <summary>
@@ -86,26 +85,22 @@ namespace DDGIURP
         uint nodeCount;
         float3 aabbMin, aabbMax;
 
-        public bool IsTLAS => isTLAS;
-        public bool IsIndexed => isIndexed;
-        public uint AllocatedNodes => (uint)bvhNode.Length;
-        public uint TrisCount => primCount;
-        public uint InstCount => primCount;
-        public uint PrimCount => primCount;
-        public uint NodeCount => nodeCount;
-        public bool IsCreated => bvhNode.IsCreated;
+        public readonly bool IsTLAS => isTLAS;
+        public readonly bool IsIndexed => isIndexed;
+        public readonly uint AllocatedNodes => (uint)bvhNode.Length;
+        public readonly uint TrisCount => primCount;
+        public readonly uint InstCount => primCount;
+        public readonly uint PrimCount => primCount;
+        public readonly uint NodeCount => nodeCount;
+        public readonly bool IsCreated => bvhNode.IsCreated;
 
         public void Dispose() {
-            Debug.Log("Was allocated? " + fragments.IsCreated);
-
             if (primitives.IsCreated) primitives.Dispose();
             if (bvhNode.IsCreated) bvhNode.Dispose();
             if (fragments.IsCreated) fragments.Dispose();
-
-            Debug.Log("Have successfully deallocated? " + !fragments.IsCreated);
         }
 
-        public void Allocate (NativeArray<float3> vertices, Allocator allocator)
+        public void Build (NativeArray<float3> vertices, Allocator allocator)
         {
             Assert.IsTrue(vertices.Length != 0, "BVH.Allocate: Empty mesh with no verticies.");
             isTLAS = false;
@@ -125,9 +120,12 @@ namespace DDGIURP
             bvhNode.Length = bvhNode.Capacity;
             primitives.Length = primitives.Capacity;
             fragments.Length = fragments.Capacity;
+
+            PrepareBuildBLAS();
+            BuildInternal();
         }
 
-        public void Allocate(NativeArray<float3> vertices, NativeArray<uint> indices, Allocator allocator)
+        public void Build(NativeArray<float3> vertices, NativeArray<uint> indices, Allocator allocator)
         {
             Assert.IsTrue(vertices.Length != 0, "BVH.Allocate: Empty mesh with no verticies.");
             isTLAS = false;
@@ -147,9 +145,12 @@ namespace DDGIURP
             bvhNode.Length = bvhNode.Capacity;
             primitives.Length = primitives.Capacity;
             fragments.Length = fragments.Capacity;
+            
+            PrepareBuildBLAS();
+            BuildInternal();
         }
 
-        public void Allocate(NativeArray<BLASInstance> blasInstances, Allocator allocator)
+        public void Build(NativeArray<BLASInstance> blasInstances, Allocator allocator)
         {
             Assert.IsTrue(blasInstances.Length == 0, "BVH.Allocate: Empty TLAS with no instances.");
             isTLAS = true;
@@ -169,14 +170,8 @@ namespace DDGIURP
             bvhNode.Length = bvhNode.Capacity;
             primitives.Length = primitives.Capacity;
             fragments.Length = fragments.Capacity;
-        }
 
-        public void Build ()
-        {
-            if(isTLAS) PrepareBuildTLAS();
-            else if(IsIndexed) PrepareBuildBLAS();
-            else PrepareBuildBLAS();
-
+            PrepareBuildTLAS();
             BuildInternal();
         }
 
@@ -308,7 +303,7 @@ namespace DDGIURP
                         count[i] = 0;
                     }
 
-                    // Process all tris for x,y and z at once
+                    // Process all tris for x, y and z at once
                     for (int i = 0; i < node->triCount; i++)
                     {
                         int fi = (int)primitives[(int)node->leftFirst + i];
