@@ -280,7 +280,7 @@ namespace TrueTrace {
           node.imask = 0;
 
           node.base_index_child = (uint)cwbvhnode_count;
-          node.basCWe_index_triangle = (uint)cwbvhindex_count;
+          node.base_index_triangle = (uint)cwbvhindex_count;
 
           int node_internal_count = 0;
           int node_triangle_count = 0;

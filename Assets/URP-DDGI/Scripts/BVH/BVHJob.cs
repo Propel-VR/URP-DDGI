@@ -15,7 +15,7 @@ namespace DDGIURP
         public void Execute(int index)
         {
             var bvh = BVHs[index];
-            bvh.Build();
+            //bvh.Build();
             BVHs[index] = bvh;
         }
     }
