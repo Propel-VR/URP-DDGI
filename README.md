@@ -6,6 +6,8 @@ An implementation of the ["Dynamic Diffuse Global Illumination with Ray-Traced I
 
 Many improvements were borrowed from [Timberdoodle's](https://github.com/Sunset-Flock/Timberdoodle/) PGI system.
 
+Although [URP DDGI implementations](https://github.com/SanYue-TechArt/RTXGI-DDGI-URP) have already been made before, this version aims to be hardware adgnostic and provide alternatives to Raytracing Hardware to generate the probes.
+
 ## TODO
 - Rendering the probes debug view, reading from the texture
 - Implementing hardware agnostic-raytracing by reusing existing BVH8-based [pathtracing solution] (https://github.com/Pjbomb2/TrueTrace-Unity-Pathtracer)
