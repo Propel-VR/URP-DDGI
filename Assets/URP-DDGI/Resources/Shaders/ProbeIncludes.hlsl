@@ -1,5 +1,5 @@
-#ifndef PROBLEINCLUDES_HLSL
-#define PROBLEINCLUDES_HLSL
+#ifndef PROBEINCLUDES_HLSL
+#define PROBEINCLUDES_HLSL
 
 #include "../../Scripts/ProbeDefinitions.cs.hlsl"
 

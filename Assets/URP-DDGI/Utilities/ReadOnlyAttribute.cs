@@ -8,4 +8,8 @@ namespace DDGIURP
 
     }
     
+    public class LayerAttribute : PropertyAttribute
+    {
+
+    }
 }

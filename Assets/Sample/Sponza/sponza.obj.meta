@@ -3,7 +3,132 @@ guid: a0caa1ce86f1ef145a35e57628bc3e36
 ModelImporter:
   serializedVersion: 22200
   internalIDToNameTable: []
-  externalObjects: {}
+  externalObjects:
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: Material__25
+    second: {fileID: 2100000, guid: 2659e829b4a51d8448b9730a48007fb2, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: Material__298
+    second: {fileID: 2100000, guid: 3112b1b6089f38d40ad8f821863bd4da, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: Material__47
+    second: {fileID: 2100000, guid: 7c01c34922d312541983a908bfd4c030, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: Material__57
+    second: {fileID: 2100000, guid: 74943d80bfaa4054ebfaf54149f1744a, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: arch
+    second: {fileID: 2100000, guid: 723243de6f0d4cd4e80760747c4c3d8d, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: bricks
+    second: {fileID: 2100000, guid: fec3861c71325df48926722c33410b51, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: ceiling
+    second: {fileID: 2100000, guid: 02ff4e818a3fb734bb8ef27f7be515b0, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: chain
+    second: {fileID: 2100000, guid: 96addf5e55abe844ca4c937e5c6ea948, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: column_a
+    second: {fileID: 2100000, guid: 2f9ba9a6b081ba348a1464073c84c3de, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: column_b
+    second: {fileID: 2100000, guid: c54cadc896216da43b3066c1d6f197eb, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: column_c
+    second: {fileID: 2100000, guid: db5b2911aad18a649882b4537e6f85ee, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: details
+    second: {fileID: 2100000, guid: 2dcf79636935c12479e7f54504254d6e, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_a
+    second: {fileID: 2100000, guid: acb9ab0aeb4930942963294c6538eb29, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_c
+    second: {fileID: 2100000, guid: 8dc5226f366e7e443a960b488104f6e5, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_d
+    second: {fileID: 2100000, guid: f4ff3aecc94442347b7156b0db354d78, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_e
+    second: {fileID: 2100000, guid: c3080bc1892bbea4f890af1865f2207f, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_f
+    second: {fileID: 2100000, guid: 7a6d585a6d5b3bc419fec2f3227979b1, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: fabric_g
+    second: {fileID: 2100000, guid: 76157fdfb962cf249830d7b9d66469ac, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: flagpole
+    second: {fileID: 2100000, guid: 37ff1707a911c8040a6e3f7e6631eb24, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: floor
+    second: {fileID: 2100000, guid: b1f1703a8ee3c144998571179a9ec12c, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: leaf
+    second: {fileID: 2100000, guid: 98cee171efa2e724fb0281f79047bd59, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: roof
+    second: {fileID: 2100000, guid: 656845b7ad4d36746a27004b791f2f35, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: vase
+    second: {fileID: 2100000, guid: d98fb11ea2dec03478c5298e5842faa7, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: vase_hanging
+    second: {fileID: 2100000, guid: 0b42210f0c1953d48abcabe18e958962, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: vase_round
+    second: {fileID: 2100000, guid: 411483c236226804f9df914e92793740, type: 2}
   materials:
     materialImportMode: 2
     materialName: 0
@@ -30,7 +155,7 @@ ModelImporter:
     extraExposedTransformPaths: []
     extraUserProperties: []
     clipAnimations: []
-    isReadable: 0
+    isReadable: 1
   meshes:
     lODScreenPercentages: []
     globalScale: 0.01
@@ -49,7 +174,7 @@ ModelImporter:
     generateSecondaryUV: 0
     useFileUnits: 1
     keepQuads: 0
-    weldVertices: 1
+    weldVertices: 0
     bakeAxisConversion: 0
     preserveHierarchy: 0
     skinWeightsMode: 0
@@ -57,7 +182,7 @@ ModelImporter:
     minBoneWeight: 0.001
     optimizeBones: 1
     meshOptimizationFlags: -1
-    indexFormat: 0
+    indexFormat: 1
     secondaryUVAngleDistortion: 8
     secondaryUVAreaDistortion: 15.000001
     secondaryUVHardAngle: 88
@@ -68,7 +193,7 @@ ModelImporter:
     useFileScale: 1
     strictVertexDataChecks: 0
   tangentSpace:
-    normalSmoothAngle: 60
+    normalSmoothAngle: 78
     normalImportMode: 0
     tangentImportMode: 3
     normalCalculationMode: 4

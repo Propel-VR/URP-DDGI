@@ -134,10 +134,10 @@ namespace DDGIURP
             int meshIndex = 0;
             foreach (var mesh in uniqueMeshes)
             {
-                var triangleCount = BVHScene_Utils.GetTriangleCount(mesh);
+                var triangleCount = SceneUtils.GetTriangleCount(mesh);
                 BLAS.Add(new BLAS(mesh, meshIndex++, totalTriangleCount, triangleCount));
                 totalVertexCount += mesh.vertexCount;
-                totalTriangleCount += BVHScene_Utils.GetTriangleCount(mesh);
+                totalTriangleCount += SceneUtils.GetTriangleCount(mesh);
             }
 
             vertexPositionBuffer = new ComputeBuffer(totalTriangleCount * 3, VERTEX_SIZE);
@@ -156,22 +156,20 @@ namespace DDGIURP
 
                 var vertexBuffer = mesh.GetVertexBuffer(0);
                 var indexBuffer = mesh.GetIndexBuffer();
-                var triangleCount = BVHScene_Utils.GetTriangleCount(mesh);
+                var triangleCount = SceneUtils.GetTriangleCount(mesh);
 
                 // Determine where in the Unity vertex buffer each vertex attribute is
-                BVHScene_Utils.FindVertexAttribute(mesh, VertexAttribute.Position, out int positionOffset, out int vertexStride);
-                BVHScene_Utils.FindVertexAttribute(mesh, VertexAttribute.Normal, out int normalOffset, out vertexStride);
-                BVHScene_Utils.FindVertexAttribute(mesh, VertexAttribute.TexCoord0, out int uvOffset, out vertexStride);
+                var attributes = SceneUtils.FindAttributes(mesh);
 
                 // Configure compute shader
                 meshProcessingShader.SetBuffer(0, "VertexBuffer", vertexBuffer);
                 meshProcessingShader.SetBuffer(0, "IndexBuffer", indexBuffer);
                 meshProcessingShader.SetBuffer(0, "VertexPositionBuffer", vertexPositionBuffer);
                 meshProcessingShader.SetBuffer(0, "TriangleAttributesBuffer", triangleAttributeBuffer);
-                meshProcessingShader.SetInt("VertexStride", vertexStride);
-                meshProcessingShader.SetInt("PositionOffset", positionOffset);
-                meshProcessingShader.SetInt("NormalOffset", normalOffset);
-                meshProcessingShader.SetInt("UVOffset", uvOffset);
+                meshProcessingShader.SetInt("VertexStride", attributes.vertexStride);
+                meshProcessingShader.SetInt("PositionOffset", attributes.position.offset);
+                meshProcessingShader.SetInt("NormalOffset", attributes.normal.offset);
+                meshProcessingShader.SetInt("UVOffset", attributes.uv0.offset);
                 meshProcessingShader.SetInt("TriangleCount", triangleCount);
                 meshProcessingShader.SetInt("OutputTriangleStart", totalTriangleCount);
 
@@ -229,6 +227,6 @@ namespace DDGIURP
             sw.Stop();
             Debug.Log($"[DDGI Scene] BVH completed in {sw.Elapsed.TotalMilliseconds}ms.");
         }
-    }
 #endif
+    }
 }

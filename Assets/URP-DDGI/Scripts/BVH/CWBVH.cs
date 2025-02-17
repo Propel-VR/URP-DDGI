@@ -4,11 +4,7 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
-using UnityEditor.Experimental.GraphView;
-using UnityEngine.Assertions;
-using UnityEngine.UI;
 using static DDGIURP.BVHUtils;
-using static Unity.Collections.AllocatorManager;
 using static Unity.Mathematics.math;
 
 namespace DDGIURP
