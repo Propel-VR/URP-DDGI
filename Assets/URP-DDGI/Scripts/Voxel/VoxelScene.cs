@@ -228,6 +228,7 @@ namespace DDGIURP
                 cmd.SetViewport(new Rect(0, 0, resolution, resolution));
                 cmd.SetRandomWriteTarget(1, volume);
                 cmd.DrawProcedural(tr.localToWorldMatrix, voxelMaterial, 0, MeshTopology.Triangles, indexCount, 1, mpb);
+
                 l++;
             }
 

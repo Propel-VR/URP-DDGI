@@ -26,15 +26,15 @@ MonoBehaviour:
     probeVolumeBlendStatesCS: {fileID: 7200000, guid: b9a23f869c4fd45f19c5ada54dd82176, type: 3}
   m_RendererFeatures:
   - {fileID: 7833122117494664109}
-  - {fileID: 6666280862005162168}
-  m_RendererFeatureMap: ad6b866f10d7b46cb870cde01f63835c
+  - {fileID: 7300428768346378815}
+  m_RendererFeatureMap: ad6b866f10d7b46c3f12541549555065
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}
   m_AssetVersion: 2
   m_OpaqueLayerMask:
     serializedVersion: 2
-    m_Bits: 2147483648
+    m_Bits: 55
   m_TransparentLayerMask:
     serializedVersion: 2
     m_Bits: 4294967295
@@ -53,7 +53,7 @@ MonoBehaviour:
   m_DepthTextureFormat: 0
   m_AccurateGbufferNormals: 0
   m_IntermediateTextureMode: 0
---- !u!114 &6666280862005162168
+--- !u!114 &7300428768346378815
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -63,13 +63,16 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 553afc5c7e9c4944d8219a7e9e177359, type: 3}
-  m_Name: DDGI
+  m_Name: DDGIFeature
   m_EditorClassIdentifier: 
   m_Active: 1
   settings:
     raytracingType: 0
     dynamismMode: 0
     voxelRendererLayer: 31
+    voxelCascadeResolution: 256
+    voxelBaseCascadeScale: 0.1
+  debugTexture: {fileID: 0}
 --- !u!114 &7665201576848811981
 MonoBehaviour:
   m_ObjectHideFlags: 0

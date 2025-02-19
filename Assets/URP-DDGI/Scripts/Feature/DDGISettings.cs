@@ -40,13 +40,9 @@ namespace DDGIURP
         public DDGIRaytracingType raytracingType;
         public DDGIDynamismMode dynamismMode;
 
-        //[Header("Probes")]
-
         [Header("Voxels")]
         [Layer] public int voxelRendererLayer;
-
-        //[Header("HW Raytracing")]
-
-        //[Header("Lighting")]
+        public int voxelCascadeResolution = 256;
+        public float voxelBaseCascadeScale = 0.1f;
     }
 }

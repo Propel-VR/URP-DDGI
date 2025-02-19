@@ -31,6 +31,7 @@ namespace DDGIURP
             VolumeCenter = Shader.PropertyToID("VolumeCenter"),
             _BaseMap = Shader.PropertyToID("_BaseMap"),
             _BaseMap_ST = Shader.PropertyToID("_BaseMap_ST"),
+            _VoxelCascade0 = Shader.PropertyToID("_VoxelCascade0"),
             _ = Shader.PropertyToID("_");
     }
 }

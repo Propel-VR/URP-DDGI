@@ -124,7 +124,7 @@ Shader "Unlit/VoxelShader"
                 return o;
             }
 
-            half2 frag (Varyings i) : SV_Target
+            half frag (Varyings i) : SV_Target
             {
                 half4 col = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, i.uv);
 
