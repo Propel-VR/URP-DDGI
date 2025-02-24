@@ -1,6 +1,6 @@
 #pragma kernel Clear
 
-RWTexture3D<float4> _VoxelTarget;
+RWTexture3D<float4> _VoxelCascade0;
 uint resolution;
 
 [numthreads(4,4,4)]
@@ -8,5 +8,5 @@ void Clear(uint3 id : SV_DispatchThreadID)
 {
 	if(any(id >= resolution)) return;
 
-	_VoxelTarget[id] = float4(0,0,0,0);
+	_VoxelCascade0[id] = float4(0,0,0,0);
 }

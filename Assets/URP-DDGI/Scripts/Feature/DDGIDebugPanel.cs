@@ -8,10 +8,12 @@ namespace DDGIURP {
     {
         public class DebugPanelSettings
         {
-            public bool voxelEnabled = true;
+            public bool voxelEnabled = false;
 
         }
-        static DebugPanelSettings debugSettings = new();
+        static DebugPanelSettings settings = new();
+
+        public static bool VoxelEnabled => settings.voxelEnabled;
 
         public static void CreatePanel ()
         {
@@ -25,8 +27,8 @@ namespace DDGIURP {
                     {
                         displayName = "Toggle Voxel View",
                         tooltip = "Enable or disable the main directional light",
-                        getter = () => debugSettings.voxelEnabled,
-                        setter = value => debugSettings.voxelEnabled = value,
+                        getter = () => settings.voxelEnabled,
+                        setter = value => settings.voxelEnabled = value,
                         onValueChanged = ToggleVoxelViewCallback
                     }
                 })

@@ -19,10 +19,13 @@ namespace DDGIURP
     public class VoxelRenderer : MonoBehaviour
     {
         private Renderer sourceRenderer;
+        private Renderer renderer;
         private Transform sourceTransform;
         private GameObject rendererCopy;
         private Transform copyTransform;
         private Mesh registeredMesh;
+
+        private Material[] replacementMaterials;
 
         public void Refresh ()
         {
@@ -56,23 +59,19 @@ namespace DDGIURP
             copyTransform.localScale = transform.localScale;
             rendererCopy.layer = DDGIFeature.VoxelLayer;
 
+
             if(sourceRenderer is MeshRenderer)
             {
                 var meshFilter = rendererCopy.AddComponent<MeshFilter>();
                 var sourceMeshFilter = GetComponent<MeshFilter>();
+
                 registeredMesh = sourceMeshFilter.sharedMesh;
                 var splitMesh = VoxelRendererManager.AddMesh(registeredMesh, isSkinned: false);
                 meshFilter.sharedMesh = splitMesh;
 
                 var meshRenderer = rendererCopy.AddComponent<MeshRenderer>();
                 var sourceMeshRenderer = GetComponent<MeshRenderer>();
-                meshRenderer.sharedMaterials = sourceMeshRenderer.sharedMaterials;
-                meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
-                meshRenderer.rayTracingMode = UnityEngine.Experimental.Rendering.RayTracingMode.Off;
-                meshRenderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
-                meshRenderer.receiveShadows = false;
-
-
+                renderer = meshRenderer;
             }
             else if(sourceRenderer is SkinnedMeshRenderer)
             {
@@ -82,14 +81,24 @@ namespace DDGIURP
                 registeredMesh = skinnedRenderer.sharedMesh;
                 var splitMesh = VoxelRendererManager.AddMesh(registeredMesh, isSkinned: true);
                 skinnedRenderer.sharedMesh = splitMesh;
-
-                skinnedRenderer.sharedMaterials = sourceSkinnedRenderer.sharedMaterials;
                 skinnedRenderer.rootBone = sourceSkinnedRenderer.rootBone;
-                skinnedRenderer.shadowCastingMode = ShadowCastingMode.Off;
-                skinnedRenderer.rayTracingMode = UnityEngine.Experimental.Rendering.RayTracingMode.Off;
-                skinnedRenderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
-                skinnedRenderer.receiveShadows = false;
+                renderer = skinnedRenderer;
             }
+
+            renderer.shadowCastingMode = ShadowCastingMode.Off;
+            renderer.rayTracingMode = UnityEngine.Experimental.Rendering.RayTracingMode.Off;
+            renderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            renderer.receiveShadows = false;
+
+            var voxelShader = Resources.Load<Shader>("Shaders/VoxelShader");
+            var sourceMats = sourceRenderer.sharedMaterials;
+            replacementMaterials = new Material[sourceMats.Length];
+            for(int i = 0; i < sourceMats.Length; i++)
+            {
+                replacementMaterials[i] = new Material(sourceMats[i]);
+                replacementMaterials[i].shader = voxelShader;
+            }
+            renderer.sharedMaterials = replacementMaterials;
         }
 
         private void OnDestroy ()
@@ -108,13 +117,17 @@ namespace DDGIURP
             if (EditorApplication.isPlaying)
             {
                 Destroy(rendererCopy);
+                foreach (var mat in replacementMaterials) Destroy(mat);
             }
             else
             {
                 DestroyImmediate(rendererCopy);
+                foreach (var mat in replacementMaterials) DestroyImmediate(mat);
             }
 #else
             Destroy(rendererCopy);
+            Destroy(replacementMaterial);
+            foreach (var mat in replacementMaterials) Destroy(mat);
 #endif
         }
     }

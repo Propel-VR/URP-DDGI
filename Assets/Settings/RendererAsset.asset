@@ -37,7 +37,7 @@ MonoBehaviour:
     m_Bits: 55
   m_TransparentLayerMask:
     serializedVersion: 2
-    m_Bits: 4294967295
+    m_Bits: 55
   m_DefaultStencilState:
     overrideStencilState: 0
     stencilReference: 1
@@ -73,6 +73,7 @@ MonoBehaviour:
     voxelCascadeResolution: 256
     voxelBaseCascadeScale: 0.1
   debugTexture: {fileID: 0}
+  debugTexture2: {fileID: 0}
 --- !u!114 &7665201576848811981
 MonoBehaviour:
   m_ObjectHideFlags: 0
